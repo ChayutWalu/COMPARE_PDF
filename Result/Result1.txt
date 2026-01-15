@@ -1,0 +1,52 @@
+Starting processing...
+Initializing Typhoon Client...
+
+Processing C:/Users/chayu/Desktop/PDF Compare/ฟอร์มผ่อนชำระ1.pdf...
+
+Processing C:/Users/chayu/Desktop/PDF Compare/ฟอร์มผ่อนชำระ2.pdf...
+
+Classifying Document 1...
+--> Result:
+Classification: Insurance Application Form  
+Summary: This is an insurance application form for motor vehicle insurance issued by Viriyah Insurance Public Company Limited. It includes sections for policyholder details, vehicle information, required documents, payment terms with interest-free installment options through various banks and credit cards, and signatures from the applicant, agent, and company representative. The form outlines conditions for coverage activation upon successful bank payment and specifies installment plans with minimum amounts and monthly payments.
+
+Classifying Document 2...
+--> Result:
+Classification: Insurance Application Form  
+Summary: This is an insurance application form for motor vehicle insurance issued by Viriyah Insurance Public Company Limited. It includes sections for policy details, insured party information, vehicle details, required documents, and installment payment arrangements via credit card with 0% interest. The form also contains fields for signatures from the applicant, agent/broker, and company representative, along with personal and financial information such as ID number, credit card details, and relationship to the insured. The document serves as a formal request to initiate or renew a motor insurance policy.
+
+Comparing Documents...
+--> Comparison Result:
+**Similarities:**  
+- Both documents are identical in structure, layout, and content format.  
+- The form sections (รายการ 1 to รายการ 5) are exactly the same in wording and order.  
+- All fields such as insurance type, policyholder details, vehicle information, supporting documents, installment payment terms, credit card options, and signature blocks are present in both versions.  
+- The instructions for 0% interest installment payments (minimum amount 2,500 THB, minimum monthly payment 500 THB) are unchanged.  
+- The note regarding policy coverage taking effect only after successful bank collection is identical.  
+- The list of accepted credit cards (Kasikorn, Bangkok Bank, SCB, Krungthai, Citibank, UOB, Krungsri Group, Central, Simple Visa Card, First Choice, HomePro, Tesco Lotus, Siam Katatsumaya, AIA, Manchester United) remains unchanged.  
+
+**Differences:**  
+- **Policyholder Name:** Document 1 lists "นายมิสเตอร์ แฟนแทสติก" while Document 2 lists "นางอินวิซิเบิล วูเมน".  
+- **Address:** Document 1 has "ตึกอเวนเจอรส์ 109/616 ซอยทองหล่อ616 จังหวัดสมุทรสงคราม", whereas Document 2 shows "ตึกแอตแลนติส 32/123 ซอยพัทยา จังหวัดพัทยา".  
+- **Postal Code:** Document 1 uses "12345", Document 2 uses "15243".  
+- **Phone Number:** Document 1 has "012345678", Document 2 has "023426161".  
+- **Vehicle Details:**  
+  - *Brand/Model:* Both have "แบตโมบิล แบตแมนบีกินส์" — identical.  
+  - *License Plate:* Document 1: "บม123", Document 2: "นม333" — different.  
+  - *Year of Registration:* Both show "2545" — identical.  
+  - *Chassis Number:* Document 1: "12345BM", Document 2: "41321NM" — different.  
+  - *Seats/Cubic Capacity/Weight:* Document 1: "69 แขนและขา", Document 2: "500" — significantly different.  
+- **Installment Amounts:**  
+  - *Total Amount:* Document 1: "สามสิบบาท" (30 THB), Document 2: "ห้าพันบาทถ้วน" (5,000 THB).  
+  - *Amount per Installment:* Document 1: Not specified numerically (only "บาท"), Document 2: "5000" written clearly.  
+- **Credit Card Information:**  
+  - *Card Number:* Document 1 has no number entered; Document 2 has "1   9  3  4     6" — partially filled.  
+  - *Card Expiry Date:* Not provided in either document.  
+- **Signature Section:**  
+  - *Policyholder Signature:* Document 1 has no name or date signed; Document 2 also lacks signature but includes a placeholder for it.  
+- **Currency in Words:** Document 1 says "สามสิบบาท", Document 2 says "ห้าพันบาทถ้วน" — vastly different amounts.
+
+**Conclusion:**  
+The two documents are structurally and functionally identical forms used by Viriyah Insurance Public Company Limited for car insurance installment applications. However, they contain entirely different personal and financial data, indicating they belong to two distinct applicants. The most significant differences lie in the applicant’s identity, address, contact details, vehicle registration, and notably, the total insurance premium amount (30 THB vs. 5,000 THB), which suggests one may be an incomplete draft or error-prone entry, while the other appears more complete and realistic.
+
+
