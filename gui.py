@@ -1,5 +1,7 @@
 import customtkinter as ctk
 from tkinter import filedialog
+import tkinter as tk  # เพิ่ม import นี้
+from PIL import ImageTk # เพิ่ม import นี้
 import threading
 from main import process_files
 from ocr_processor import highlight_text_differences
@@ -14,7 +16,7 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("PDF Compare & Classify")
-        self.geometry("800x600")
+        self.geometry("1000x800") # ขยายหน้าจอหลัก
 
         self.pdf1_path = ""
         self.pdf2_path = ""
@@ -22,11 +24,7 @@ class App(ctk.CTk):
         # Layout
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(3, weight=1)
-        # Row 4 used to be save button, we might need more space or a popup
-        # Let's make the main window bigger or split the view?
-        # A scrollable frame for results might be better below the text box.
         self.grid_rowconfigure(5, weight=1) # Visual diff area
-
 
         # PDF 1 Selection
         self.label1 = ctk.CTkLabel(self, text="PDF 1 not selected", fg_color="transparent")
@@ -45,7 +43,7 @@ class App(ctk.CTk):
         self.run_btn.grid(row=2, column=0, columnspan=2, padx=20, pady=20)
 
         # Results Text Area
-        self.textbox = ctk.CTkTextbox(self, width=760, height=400)
+        self.textbox = ctk.CTkTextbox(self, width=760, height=300)
         self.textbox.grid(row=3, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
 
         # Save Button
@@ -53,8 +51,11 @@ class App(ctk.CTk):
         self.save_btn.grid(row=4, column=0, columnspan=2, padx=20, pady=10)
 
         # Visual Result Area (Scrollable Frame)
-        self.visual_frame = ctk.CTkScrollableFrame(self, label_text="Visual Comparison", height=300)
+        self.visual_frame = ctk.CTkScrollableFrame(self, label_text="Visual Comparison", height=400)
         self.visual_frame.grid(row=5, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+        
+        # ตัวแปรเก็บภาพเพื่อป้องกัน garbage collection
+        self.current_sync_images = [] 
 
 
     def select_pdf1(self):
@@ -90,7 +91,7 @@ class App(ctk.CTk):
             self.update_progress("Generating visual highlights...")
             images = highlight_text_differences(self.pdf1_path, self.pdf2_path)
             
-            # Update GUI with images (must be done in main thread really, but let's see if ctk handles it or if I need after)
+            # Update GUI with images
             self.after(0, self.display_images, images)
             self.update_progress("Visual comparison ready.")
             
@@ -112,52 +113,100 @@ class App(ctk.CTk):
             lbl = ctk.CTkLabel(self.visual_frame, text=f"Page {idx+1}")
             lbl.grid(row=idx*2, column=0, columnspan=2, pady=(10, 0))
             
-            # Image 1
+            # สร้างฟังก์ชัน Callback ที่ส่งค่าทั้ง 2 รูปไปพร้อมกัน
+            # ใช้ default argument เพื่อ lock ค่าตัวแปรใน loop
+            on_click = lambda e, i1=img1, i2=img2, p=idx+1: self.open_sync_window(i1, i2, p)
+
+            # Image 1 (Thumbnail)
             if img1:
-                ctk_img1 = ctk.CTkImage(light_image=img1, dark_image=img1, size=(300, 400)) # Fixed size thumbnail
+                ctk_img1 = ctk.CTkImage(light_image=img1, dark_image=img1, size=(300, 400))
                 img_lbl1 = ctk.CTkLabel(self.visual_frame, image=ctk_img1, text="", cursor="hand2")
                 img_lbl1.grid(row=idx*2+1, column=0, padx=10, pady=10)
-                img_lbl1.bind("<Button-1>", lambda e, img=img1, t=f"Document 1 - Page {idx+1}": self.open_zoom_window(img, t))
+                img_lbl1.bind("<Button-1>", on_click)
                 
-                # Add a tooltip or hint (optional, but label below helps)
-                hint1 = ctk.CTkLabel(self.visual_frame, text="(Click to Zoom)", font=("Arial", 10))
+                hint1 = ctk.CTkLabel(self.visual_frame, text="(Click to Compare)", font=("Arial", 10))
                 hint1.grid(row=idx*2+2, column=0)
             
-            # Image 2
+            # Image 2 (Thumbnail)
             if img2:
                 ctk_img2 = ctk.CTkImage(light_image=img2, dark_image=img2, size=(300, 400))
                 img_lbl2 = ctk.CTkLabel(self.visual_frame, image=ctk_img2, text="", cursor="hand2")
                 img_lbl2.grid(row=idx*2+1, column=1, padx=10, pady=10)
-                img_lbl2.bind("<Button-1>", lambda e, img=img2, t=f"Document 2 - Page {idx+1}": self.open_zoom_window(img, t))
+                img_lbl2.bind("<Button-1>", on_click)
 
-                hint2 = ctk.CTkLabel(self.visual_frame, text="(Click to Zoom)", font=("Arial", 10))
+                hint2 = ctk.CTkLabel(self.visual_frame, text="(Click to Compare)", font=("Arial", 10))
                 hint2.grid(row=idx*2+2, column=1)
 
-    def open_zoom_window(self, pil_image, title):
+    def open_sync_window(self, img1, img2, page_num):
+        """หน้าต่างเปรียบเทียบแบบ Sync Scroll"""
         top = ctk.CTkToplevel(self)
-        top.title(title)
-        top.geometry("1000x800")
-        
-        # Bring to front
+        top.title(f"Comparison View - Page {page_num} (Synchronized Scrolling)")
+        top.geometry("1400x900")
         top.attributes("-topmost", True)
         
-        # Scrollable frame for the large image
-        scroll_frame = ctk.CTkScrollableFrame(top, label_text=title)
-        scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        # 1. Main Container
+        container = ctk.CTkFrame(top)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # Use a larger size for the image (preserving aspect ratio)
-        # 150 dpi is typically around 1240 width for A4.
-        # Let's map it to its actual size or slightly limited if super huge.
-        w, h = pil_image.size
+        # 2. Scrollbar (ใช้ควบคุมทั้ง 2 ฝั่ง)
+        scrollbar = ctk.CTkScrollbar(container, orientation="vertical")
+        scrollbar.pack(side="right", fill="y")
         
-        # Ensure it fits reasonably but is zoomed in
-        scale_factor = 1.0 # Display at native resolution (150 dpi is already "zoomed" vs thumbnail)
-        
-        full_img = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(int(w*scale_factor), int(h*scale_factor)))
-        
-        lbl = ctk.CTkLabel(scroll_frame, image=full_img, text="")
-        lbl.pack(padx=10, pady=10)
+        # 3. Canvas Setup (ใช้ tk.Canvas เพื่อการควบคุมที่ละเอียดกว่า ctkScrollableFrame)
+        # แบ่งครึ่งซ้ายขวา
+        pane = tk.PanedWindow(container, orient="horizontal", sashwidth=5, bg="#404040")
+        pane.pack(fill="both", expand=True, side="left")
 
+        canvas1 = tk.Canvas(pane, bg="#303030", highlightthickness=0)
+        canvas2 = tk.Canvas(pane, bg="#303030", highlightthickness=0)
+        
+        pane.add(canvas1)
+        pane.add(canvas2)
+        
+        # 4. Sync Logic Function
+        def scroll_both(*args):
+            # เมื่อ Scrollbar ขยับ -> สั่ง Canvas ทั้งคู่ขยับตาม
+            canvas1.yview(*args)
+            canvas2.yview(*args)
+        
+        def on_mousewheel(event):
+            # เมื่อหมุนเมาส์ -> สั่ง Scrollbar และ Canvas ขยับ
+            # Windows: event.delta, Mac/Linux อาจต่างกันเล็กน้อย
+            delta = int(-1*(event.delta/120))
+            canvas1.yview_scroll(delta, "units")
+            canvas2.yview_scroll(delta, "units")
+            return "break" # ป้องกันการทำงานซ้ำซ้อน
+
+        # เชื่อม Scrollbar เข้ากับฟังก์ชัน Sync
+        scrollbar.configure(command=scroll_both)
+        
+        # เชื่อม Canvas กลับไปหา Scrollbar (เอาแค่ฝั่งซ้ายเป็น Master ก็พอ)
+        canvas1.configure(yscrollcommand=scrollbar.set)
+        
+        # Bind MouseWheel
+        canvas1.bind("<MouseWheel>", on_mousewheel)
+        canvas2.bind("<MouseWheel>", on_mousewheel)
+        # Linux compatibility (Button-4/5)
+        canvas1.bind("<Button-4>", lambda e: on_mousewheel(type('Event', (object,), {'delta': 120})()))
+        canvas1.bind("<Button-5>", lambda e: on_mousewheel(type('Event', (object,), {'delta': -120})()))
+
+        # 5. Draw Images
+        self.current_sync_images = [] # Clear references
+
+        def draw_img(canvas, pil_img):
+            if not pil_img: return
+            # แปลงเป็น PhotoImage สำหรับ tkinter
+            tk_img = ImageTk.PhotoImage(pil_img)
+            self.current_sync_images.append(tk_img) # ต้องเก็บ ref ไว้ไม่งั้นภาพหาย
+            
+            # วาดภาพลง Canvas
+            canvas.create_image(0, 0, anchor="nw", image=tk_img)
+            
+            # ตั้งค่า Scroll Region ให้เท่ากับขนาดภาพ
+            canvas.configure(scrollregion=(0, 0, pil_img.width, pil_img.height))
+
+        draw_img(canvas1, img1)
+        draw_img(canvas2, img2)
 
 
     def update_progress(self, msg):
