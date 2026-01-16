@@ -1,19 +1,19 @@
 import pytesseract
 import fitz  # PyMuPDF
-from PIL import Image, ImageDraw
+from PIL import Image
 import io
 import os
 import sys
 import difflib
 
-# Attempt to locate tesseract executable if not in PATH
+# ตั้งค่า Path ของ Tesseract (ถ้ามี)
 DEFAULT_TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 if os.path.exists(DEFAULT_TESSERACT_PATH):
     pytesseract.pytesseract.tesseract_cmd = DEFAULT_TESSERACT_PATH
 
 def extract_text_from_pdf(pdf_path, lang='thai+eng'):
     """
-    Extracts text from a PDF file using OCR (via PyMuPDF and Tesseract).
+    แกะข้อความจาก PDF (ใช้ OCR ถ้าจำเป็น) - ฟังก์ชันเดิม ไม่มีการเปลี่ยนแปลง
     """
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF file not found: {pdf_path}")
@@ -47,49 +47,69 @@ def extract_text_from_pdf(pdf_path, lang='thai+eng'):
 
     return extracted_text
 
-def merge_rectangles(rects, x_tolerance=5, y_tolerance=3):
+def get_lines_from_page(page):
     """
-    รวมสี่เหลี่ยมที่อยู่ใกล้กันให้เป็นก้อนเดียว เพื่อลดความรกของหน้าจอ
+    ดึงข้อมูลเป็น 'บรรทัด' (Line Objects) โดยรวมกลุ่มคำที่อยู่ในระดับ Y ใกล้เคียงกัน
+    Return: List of dict {'text': str, 'rect': fitz.Rect, 'words': list, 'matched': bool}
     """
-    if not rects:
-        return []
-
-    # เรียงลำดับตามแกน Y และ X
-    rects.sort(key=lambda r: (r.y0, r.x0))
+    # ดึงคำทั้งหมด (x0, y0, x1, y1, "word", ...)
+    words = page.get_text("words")
     
-    merged = []
-    current_rect = rects[0]
-
-    for next_rect in rects[1:]:
-        # ตรวจสอบว่าอยู่ในบรรทัดเดียวกัน (Y ใกล้เคียงกัน) และ X ต่อเนื่องกัน
-        vertical_overlap = max(0, min(current_rect.y1, next_rect.y1) - max(current_rect.y0, next_rect.y0))
-        line_height = min(current_rect.y1 - current_rect.y0, next_rect.y1 - next_rect.y0)
+    # เรียงลำดับตาม Y (ปัดเศษเพื่อจัดกลุ่มบรรทัด) แล้วตาม X
+    # การหาร 5 แล้วคูณ 5 คือการสร้าง Tolerance ประมาณ 5 pixel ในแนวตั้ง
+    words.sort(key=lambda w: (round(w[1] / 5) * 5, w[0]))
+    
+    lines = []
+    current_line_words = []
+    
+    for w in words:
+        if not current_line_words:
+            current_line_words.append(w)
+            continue
         
-        is_same_line = vertical_overlap > (line_height * 0.5) # ซ้อนทับกันเกิน 50% ของความสูง
-        is_nearby_x = (next_rect.x0 - current_rect.x1) <= x_tolerance
-
-        if is_same_line and is_nearby_x:
-            # รวม rect (union)
-            current_rect = current_rect | next_rect # fitz.Rect รองรับ bitwise OR เพื่อ merge
+        # เช็คว่าคำนี้อยู่บรรทัดเดียวกับคำก่อนหน้าหรือไม่ (ดูผลต่าง Y)
+        last_w = current_line_words[-1]
+        if abs(w[1] - last_w[1]) < 6: # Tolerance ความห่างบรรทัด
+            current_line_words.append(w)
         else:
-            merged.append(current_rect)
-            current_rect = next_rect
+            # จบบรรทัดเดิม บันทึกลง list
+            lines.append(create_line_obj(current_line_words))
+            current_line_words = [w]
             
-    merged.append(current_rect)
-    return merged
+    # อย่าลืมบรรทัดสุดท้าย
+    if current_line_words:
+        lines.append(create_line_obj(current_line_words))
+        
+    return lines
 
-def get_sorted_words(page):
-    """
-    ดึงคำจากหน้า PDF และเรียงลำดับใหม่ให้ถูกต้อง (บน->ล่าง, ซ้าย->ขวา)
-    """
-    words = page.get_text("words") # (x0, y0, x1, y1, "word", block_no, line_no, word_no)
-    # Sort key: 
-    # 1. ปัดเศษ Y (round y0) เพื่อจัดกลุ่มบรรทัดเดียวกัน (tolerance 2-3 pixel)
-    # 2. x0 เพื่อเรียงจากซ้ายไปขวา
-    words.sort(key=lambda w: (round(w[1] / 3) * 3, w[0]))
-    return words
+def create_line_obj(word_list):
+    """สร้าง Object บรรทัดจากรายการคำ"""
+    # รวมข้อความ
+    text = " ".join([w[4] for w in word_list]).strip()
+    
+    # สร้างกรอบสี่เหลี่ยมคลุมทั้งบรรทัด (Union Rects)
+    r = fitz.Rect(word_list[0][:4])
+    for w in word_list[1:]:
+        r |= fitz.Rect(w[:4])
+        
+    return {
+        'text': text,
+        'rect': r,
+        'words': word_list, # เก็บคำย่อยไว้เทียบ Diff ในระดับคำ
+        'matched': False
+    }
+
+def similarity(s1, s2):
+    """คำนวณความเหมือนของ String (0.0 - 1.0)"""
+    return difflib.SequenceMatcher(None, s1, s2).ratio()
 
 def highlight_text_differences(pdf1_path, pdf2_path):
+    """
+    เปรียบเทียบเอกสารแบบ Smart Line Matching
+    1. จับคู่บรรทัดที่เหมือนกัน (Similarity > 0.6)
+    2. บรรทัดคู่กัน -> เทียบคำภายใน (Word Diff) -> ไฮไลท์เฉพาะคำที่แก้
+    3. บรรทัดไม่มีคู่ -> ไฮไลท์ทั้งบรรทัด (แดง/เขียว)
+    """
     if not os.path.exists(pdf1_path) or not os.path.exists(pdf2_path):
          return []
 
@@ -97,74 +117,86 @@ def highlight_text_differences(pdf1_path, pdf2_path):
         doc1 = fitz.open(pdf1_path)
         doc2 = fitz.open(pdf2_path)
     except Exception as e:
-        print(f"Error opening PDFs for visual diff: {e}")
+        print(f"Error opening PDFs: {e}")
         return []
 
     images = []
     max_pages = max(len(doc1), len(doc2))
 
     for i in range(max_pages):
-        # --- เตรียมข้อมูล Page 1 ---
-        words1_info = [] 
-        words1_strings = [] 
-        page1 = None
+        page1 = doc1[i] if i < len(doc1) else None
+        page2 = doc2[i] if i < len(doc2) else None
         
-        if i < len(doc1):
-            page1 = doc1[i]
-            words1_info = get_sorted_words(page1)
-            # Normalization: strip และ lower (ถ้าต้องการ)
-            words1_strings = [w[4].strip() for w in words1_info]
+        # 1. ดึงข้อมูลบรรทัด
+        lines1 = get_lines_from_page(page1) if page1 else []
+        lines2 = get_lines_from_page(page2) if page2 else []
 
-        # --- เตรียมข้อมูล Page 2 ---
-        words2_info = []
-        words2_strings = []
-        page2 = None
-        
-        if i < len(doc2):
-            page2 = doc2[i]
-            words2_info = get_sorted_words(page2)
-            words2_strings = [w[4].strip() for w in words2_info]
-
-        # --- เปรียบเทียบด้วย Difflib ---
-        matcher = difflib.SequenceMatcher(None, words1_strings, words2_strings)
-        
-        # เก็บ Rect ที่จะวาดแยกตามสีก่อน (ยังไม่วาดทันที เพื่อเอาไป merge)
-        red_rects = []   # Delete / Modify (Old)
-        green_rects = [] # Insert / Modify (New)
-
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            if tag == 'replace':
-                if page1:
-                    for k in range(i1, i2):
-                        red_rects.append(fitz.Rect(words1_info[k][:4]))
-                if page2:
-                    for k in range(j1, j2):
-                        green_rects.append(fitz.Rect(words2_info[k][:4]))
-
-            elif tag == 'delete':
-                if page1:
-                    for k in range(i1, i2):
-                        red_rects.append(fitz.Rect(words1_info[k][:4]))
-
-            elif tag == 'insert':
-                if page2:
-                    for k in range(j1, j2):
-                        green_rects.append(fitz.Rect(words2_info[k][:4]))
-
-        # --- Merge Rects & Draw ---
-        # รวมกล่องที่อยู่ติดกันให้ดูสะอาดตา
-        red_rects = merge_rectangles(red_rects)
-        green_rects = merge_rectangles(green_rects)
-
-        if page1:
-            for r in red_rects:
-                page1.draw_rect(r, color=(1, 0.3, 0.3), fill=(1, 0.3, 0.3), fill_opacity=0.3, width=0)
+        # 2. จับคู่บรรทัด (Line Matching)
+        # วนลูปบรรทัดใน Doc1 หาคู่ที่ดีที่สุดใน Doc2
+        for l1 in lines1:
+            best_match = None
+            best_score = 0.0
+            best_idx = -1
+            
+            for idx, l2 in enumerate(lines2):
+                if l2["matched"]: continue # ข้ามบรรทัดที่มีคู่แล้ว
                 
-        if page2:
-            for r in green_rects:
-                page2.draw_rect(r, color=(0.3, 1, 0.3), fill=(0.3, 1, 0.3), fill_opacity=0.3, width=0)
+                score = similarity(l1["text"], l2["text"])
+                if score > best_score:
+                    best_score = score
+                    best_match = l2
+                    best_idx = idx
+            
+            # เกณฑ์การตัดสิน (Threshold): ถ้าเหมือนเกิน 60% ถือว่าเป็นบรรทัดเดียวกัน
+            if best_score > 0.6:
+                l1["matched"] = True
+                lines2[best_idx]["matched"] = True
+                
+                # --- กรณีเจอคู่: เทียบคำภายในบรรทัด (Word Level Diff) ---
+                # ดึงเฉพาะ Text ของคำในบรรทัดนั้นมาเทียบ
+                l1_words_str = [w[4] for w in l1['words']]
+                l2_words_str = [w[4] for w in best_match['words']]
+                
+                matcher = difflib.SequenceMatcher(None, l1_words_str, l2_words_str)
+                
+                for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                    if tag == 'replace':
+                        # แก้ไข: ไฮไลท์คำเดิม(แดง) และคำใหม่(เขียว)
+                        if page1:
+                            for k in range(i1, i2):
+                                r = fitz.Rect(l1['words'][k][:4])
+                                page1.draw_rect(r, color=(1, 0.5, 0.5), fill=(1, 0.5, 0.5), fill_opacity=0.35, width=0)
+                        if page2:
+                            for k in range(j1, j2):
+                                r = fitz.Rect(best_match['words'][k][:4])
+                                page2.draw_rect(r, color=(0.5, 1, 0.5), fill=(0.5, 1, 0.5), fill_opacity=0.35, width=0)
+                                
+                    elif tag == 'delete':
+                        # ลบออก: ไฮไลท์แดงที่ Doc1
+                        if page1:
+                            for k in range(i1, i2):
+                                r = fitz.Rect(l1['words'][k][:4])
+                                page1.draw_rect(r, color=(1, 0.5, 0.5), fill=(1, 0.5, 0.5), fill_opacity=0.35, width=0)
+                                
+                    elif tag == 'insert':
+                        # เพิ่มมา: ไฮไลท์เขียวที่ Doc2
+                        if page2:
+                            for k in range(j1, j2):
+                                r = fitz.Rect(best_match['words'][k][:4])
+                                page2.draw_rect(r, color=(0.5, 1, 0.5), fill=(0.5, 1, 0.5), fill_opacity=0.35, width=0)
+            
+            else:
+                # --- กรณีหาคู่ไม่เจอ: แสดงว่าบรรทัดนี้ถูกลบหายไปทั้งบรรทัด ---
+                if page1:
+                    page1.draw_rect(l1["rect"], color=(1, 0.2, 0.2), fill=(1, 0.2, 0.2), fill_opacity=0.2, width=0)
 
-        # --- Render เป็นรูปภาพ ---
+        # 3. เก็บตกบรรทัดใน Doc2 ที่ไม่มีคู่ (แสดงว่าถูกเพิ่มเข้ามาทั้งบรรทัด)
+        for l2 in lines2:
+            if not l2["matched"]:
+                if page2:
+                    page2.draw_rect(l2["rect"], color=(0.2, 1, 0.2), fill=(0.2, 1, 0.2), fill_opacity=0.2, width=0)
+
+        # 4. Render เป็นรูปภาพส่งกลับไปที่ GUI
         img1 = None
         img2 = None
         
