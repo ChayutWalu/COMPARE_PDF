@@ -4,17 +4,11 @@ import argparse
 from ocr_processor import extract_text_from_pdf
 from llm_client import TyphoonClient
 
-def process_files(pdf1_path, pdf2_path, progress_callback=None):
+def process_files(pdf1_path, pdf2_path, language='en', progress_callback=None):
     """
     Processes two PDF files and returns the comparison result.
-    
     Args:
-        pdf1_path (str): Path to the first PDF.
-        pdf2_path (str): Path to the second PDF.
-        progress_callback (func): Optional callback for status updates (msg).
-    
-    Returns:
-        str: The combined result string.
+        language (str): 'en' for English, 'th' for Thai.
     """
     output = []
     def log(msg):
@@ -41,16 +35,16 @@ def process_files(pdf1_path, pdf2_path, progress_callback=None):
     except Exception as e:
         return f"Error processing {pdf2_path}: {e}"
         
-    log("\nClassifying Document 1...")
-    classification1 = client.classify_document(text1)
+    log(f"\nClassifying Document 1 ({language})...")
+    classification1 = client.classify_document(text1, language=language)
     log(f"--> Result:\n{classification1}\n")
     
-    log("Classifying Document 2...")
-    classification2 = client.classify_document(text2)
+    log(f"Classifying Document 2 ({language})...")
+    classification2 = client.classify_document(text2, language=language)
     log(f"--> Result:\n{classification2}\n")
     
-    log("Comparing Documents...")
-    comparison = client.compare_documents(text1, text2)
+    log(f"Comparing Documents ({language})...")
+    comparison = client.compare_documents(text1, text2, language=language)
     log(f"--> Comparison Result:\n{comparison}\n")
     
     return "\n".join(output)
@@ -78,4 +72,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

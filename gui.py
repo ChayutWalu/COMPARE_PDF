@@ -7,7 +7,7 @@ from main import process_files
 from ocr_processor import highlight_text_differences
 import os
 
-# สำหรับสร้าง PDF Report
+# สำหรับ PDF Report
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -22,16 +22,19 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("PDF Compare & Classify")
-        self.geometry("1000x800")
+        # ปรับขนาดเริ่มต้นให้เหมาะสมกับจอทั่วไป
+        self.geometry("1100x900")
 
         self.pdf1_path = ""
         self.pdf2_path = ""
-        self.generated_image_pairs = [] # เก็บรูปภาพที่ Gen แล้วไว้ใช้งานต่อ (Export)
+        self.generated_image_pairs = []
 
-        # Layout
+        # --- Layout Configuration ---
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(3, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        
+        # แก้ไขจุดนี้: เอา weight ออกจาก Row 3 (ปุ่ม) และไปใส่ให้ Row 4 (Text) และ Row 6 (Visual) แทน
+        self.grid_rowconfigure(4, weight=1) # ให้ Textbox ยืดได้
+        self.grid_rowconfigure(6, weight=1) # ให้ Visual Frame ยืดได้
 
         # PDF 1 Selection
         self.label1 = ctk.CTkLabel(self, text="PDF 1 not selected", fg_color="transparent")
@@ -45,28 +48,35 @@ class App(ctk.CTk):
         self.btn2 = ctk.CTkButton(self, text="Select PDF 2", command=self.select_pdf2)
         self.btn2.grid(row=1, column=0, padx=20, pady=10)
 
-        # Run Button
+        # Language Selection
+        self.lang_label = ctk.CTkLabel(self, text="Select Report Language:")
+        self.lang_label.grid(row=2, column=0, padx=20, pady=(10,0), sticky="e")
+        
+        self.lang_combobox = ctk.CTkComboBox(self, values=["English", "Thai (ภาษาไทย)"], state="readonly")
+        self.lang_combobox.grid(row=2, column=1, padx=20, pady=(10,0), sticky="w")
+        self.lang_combobox.set("Thai (ภาษาไทย)")
+
+        # Run Button (Row 3)
         self.run_btn = ctk.CTkButton(self, text="Compare Documents", command=self.start_processing)
-        self.run_btn.grid(row=2, column=0, columnspan=2, padx=20, pady=20)
+        self.run_btn.grid(row=3, column=0, columnspan=2, padx=20, pady=20)
 
-        # Results Text Area
-        self.textbox = ctk.CTkTextbox(self, width=760, height=300)
-        self.textbox.grid(row=3, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+        # Results Text Area (Row 4) - ลดความสูงเริ่มต้นลงนิดหน่อย (300 -> 200) เพื่อให้ไม่ดันปุ่มหาย
+        self.textbox = ctk.CTkTextbox(self, width=760, height=200) 
+        self.textbox.grid(row=4, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
 
-        # Action Buttons Frame
+        # Action Buttons Frame (Row 5)
         self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.action_frame.grid(row=4, column=0, columnspan=2, padx=20, pady=10)
+        self.action_frame.grid(row=5, column=0, columnspan=2, padx=20, pady=10)
 
         self.save_txt_btn = ctk.CTkButton(self.action_frame, text="Save Text Result", command=self.save_result, state="disabled")
         self.save_txt_btn.pack(side="left", padx=10)
         
-        # ปุ่มใหม่: Export PDF Report
         self.export_pdf_btn = ctk.CTkButton(self.action_frame, text="Export PDF Report", command=self.export_pdf_report, state="disabled", fg_color="green")
         self.export_pdf_btn.pack(side="left", padx=10)
 
-        # Visual Result Area
-        self.visual_frame = ctk.CTkScrollableFrame(self, label_text="Visual Comparison", height=400)
-        self.visual_frame.grid(row=5, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+        # Visual Result Area (Row 6) - ลดความสูงเริ่มต้นลง (400 -> 300)
+        self.visual_frame = ctk.CTkScrollableFrame(self, label_text="Visual Comparison", height=300)
+        self.visual_frame.grid(row=6, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
         
         self.current_sync_images = [] 
 
@@ -87,21 +97,23 @@ class App(ctk.CTk):
             self.append_text("Please select both PDF files.\n")
             return
 
+        selected_lang_str = self.lang_combobox.get()
+        lang_code = 'th' if "Thai" in selected_lang_str else 'en'
+
         self.run_btn.configure(state="disabled")
         self.export_pdf_btn.configure(state="disabled")
         self.textbox.delete("1.0", "end")
-        self.append_text("Starting processing...\n")
+        self.append_text(f"Starting processing... (Language: {selected_lang_str})\n")
         
-        thread = threading.Thread(target=self.process_thread)
+        thread = threading.Thread(target=self.process_thread, args=(lang_code,))
         thread.start()
 
-    def process_thread(self):
+    def process_thread(self, lang_code):
         try:
-            result = process_files(self.pdf1_path, self.pdf2_path, progress_callback=self.update_progress)
+            result = process_files(self.pdf1_path, self.pdf2_path, language=lang_code, progress_callback=self.update_progress)
             self.enable_save()
             
             self.update_progress("Generating visual highlights...")
-            # เก็บผลลัพธ์รูปภาพลงตัวแปรของ Class เพื่อใช้ Export
             self.generated_image_pairs = highlight_text_differences(self.pdf1_path, self.pdf2_path)
             
             self.after(0, self.display_images, self.generated_image_pairs)
@@ -153,12 +165,11 @@ class App(ctk.CTk):
         top.geometry(f"{window_width}x{window_height}")
         top.attributes("-topmost", True)
         
-        # --- Toolbar ด้านบน ---
+        # Toolbar
         toolbar = ctk.CTkFrame(top, height=40)
         toolbar.pack(fill="x", padx=10, pady=5)
         
         def save_current_view():
-            """บันทึกภาพหน้าจอหน้านี้ (รวมซ้าย-ขวา)"""
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".png",
                 filetypes=[("PNG Image", "*.png"), ("JPEG Image", "*.jpg")],
@@ -166,7 +177,6 @@ class App(ctk.CTk):
             )
             if file_path:
                 try:
-                    # สร้างภาพใหม่ขนาดเท่า 2 รูปเรียงกัน
                     total_width = img1.width + img2.width
                     max_height = max(img1.height, img2.height)
                     combined = Image.new('RGB', (total_width, max_height), (255, 255, 255))
@@ -180,7 +190,7 @@ class App(ctk.CTk):
         save_btn = ctk.CTkButton(toolbar, text="💾 Save This Comparison Image", command=save_current_view)
         save_btn.pack(side="right", padx=10)
 
-        # --- ส่วนแสดงผลภาพ (เหมือนเดิม) ---
+        # View
         target_width = (window_width // 2) - 40 
 
         def resize_to_fit(pil_img, target_w):
@@ -262,7 +272,6 @@ class App(ctk.CTk):
                 self.append_text(f"Error saving file: {e}\n")
 
     def export_pdf_report(self):
-        """สร้าง Report PDF รวม Text Summary + รูปภาพเปรียบเทียบ"""
         if not self.generated_image_pairs:
             messagebox.showwarning("No Data", "No comparison images available.")
             return
@@ -279,37 +288,32 @@ class App(ctk.CTk):
             c = canvas.Canvas(file_path, pagesize=A4)
             width, height = A4
             
-            # --- หน้า 1: Summary Text ---
-            # พยายามโหลดฟอนต์ไทย (ถ้ามี)
             font_path = "THSarabunNew.ttf" 
             if os.path.exists(font_path):
                 pdfmetrics.registerFont(TTFont('THSarabun', font_path))
                 c.setFont("THSarabun", 16)
             else:
                 c.setFont("Helvetica", 12)
-                self.append_text("Warning: THSarabun font not found, Thai text might be broken in PDF.\n")
+                self.append_text("Warning: THSarabun font not found, Thai text might be broken.\n")
 
             c.drawString(20*mm, height - 20*mm, "Comparison Report Summary")
             
             text_content = self.textbox.get("1.0", "end").split('\n')
             y = height - 35*mm
             for line in text_content:
-                if y < 20*mm: # ขึ้นหน้าใหม่ถ้าหมดหน้า
+                if y < 20*mm:
                     c.showPage()
                     if os.path.exists(font_path): c.setFont("THSarabun", 16)
                     else: c.setFont("Helvetica", 12)
                     y = height - 20*mm
                 
-                # กรองตัวอักษรที่ ReportLab อาจไม่รองรับ
                 clean_line = line.encode('utf-8', 'ignore').decode('utf-8')
                 c.drawString(20*mm, y, clean_line)
-                y -= 6*mm # ระยะห่างบรรทัด
+                y -= 6*mm
 
-            c.showPage() # จบหน้า Text
+            c.showPage()
 
-            # --- หน้าถัดไป: รูปภาพ ---
             for idx, (img1, img2) in enumerate(self.generated_image_pairs):
-                # รวมรูปซ้ายขวา
                 if img1 and img2:
                     total_w = img1.width + img2.width
                     max_h = max(img1.height, img2.height)
@@ -317,21 +321,16 @@ class App(ctk.CTk):
                     combined.paste(img1, (0, 0))
                     combined.paste(img2, (img1.width, 0))
                     
-                    # ย่อรูปลงให้พอดีหน้า A4
-                    # A4 width approx 595 points, margin 20+20 = 40
                     available_w = width - 40
                     ratio = available_w / float(total_w)
                     target_h = float(max_h) * ratio
                     
-                    # ถ้าสูงเกินหน้า A4 ให้ย่ออีก
                     if target_h > (height - 60):
                         ratio = (height - 60) / float(max_h)
                         target_h = float(max_h) * ratio
                         available_w = float(total_w) * ratio
 
-                    # วาดลง PDF
                     c.drawString(20*mm, height - 20*mm, f"Page {idx+1} Comparison")
-                    # ReportLab drawImage รับ path หรือ ImageReader
                     from reportlab.lib.utils import ImageReader
                     c.drawImage(ImageReader(combined), 20, height - 30 - target_h, width=available_w, height=target_h)
                     
