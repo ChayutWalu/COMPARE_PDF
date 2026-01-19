@@ -127,11 +127,11 @@ def highlight_text_differences(pdf1_path, pdf2_path):
         page1 = doc1[i] if i < len(doc1) else None
         page2 = doc2[i] if i < len(doc2) else None
         
-        # 1. ดึงข้อมูลบรรทัด
+        # ดึงข้อมูลบรรทัด
         lines1 = get_lines_from_page(page1) if page1 else []
         lines2 = get_lines_from_page(page2) if page2 else []
 
-        # 2. จับคู่บรรทัด (Line Matching)
+        # จับคู่บรรทัด (Line Matching)
         # วนลูปบรรทัดใน Doc1 หาคู่ที่ดีที่สุดใน Doc2
         for l1 in lines1:
             best_match = None
@@ -152,7 +152,7 @@ def highlight_text_differences(pdf1_path, pdf2_path):
                 l1["matched"] = True
                 lines2[best_idx]["matched"] = True
                 
-                # --- กรณีเจอคู่: เทียบคำภายในบรรทัด (Word Level Diff) ---
+                # กรณีเจอคู่: เทียบคำภายในบรรทัด (Word Level Diff) 
                 # ดึงเฉพาะ Text ของคำในบรรทัดนั้นมาเทียบ
                 l1_words_str = [w[4] for w in l1['words']]
                 l2_words_str = [w[4] for w in best_match['words']]
