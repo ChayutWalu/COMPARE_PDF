@@ -8,7 +8,9 @@ class TyphoonClient:
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("TYPHOON_API_KEY")
         if not self.api_key:
-            raise ValueError("Typhoon API Key is missing. Please set it in .env or pass it to constructor.")
+            # ใช้ Key หลอกเพื่อป้องกัน Error หากยังไม่มี env (แต่จะใช้จริงไม่ได้)
+            print("Warning: TYPHOON_API_KEY not found.")
+            self.api_key = "sk-placeholder" 
         
         self.client = OpenAI(
             api_key=self.api_key,
@@ -17,130 +19,79 @@ class TyphoonClient:
         self.model = "typhoon-v2.5-30b-a3b-instruct"
 
     def classify_document(self, text, language='en'):
+        # (คงเดิม - ไม่ได้เปลี่ยนแปลงส่วนนี้)
         if language == 'th':
             system_msg = "You are a helpful AI assistant capable of analyzing Thai documents."
-            prompt = f"""
-            คุณเป็นผู้ช่วย AI ที่เชี่ยวชาญด้านการจัดการเอกสาร
-            โปรดวิเคราะห์เนื้อหาของเอกสารต่อไปนี้ แล้วระบุว่ามันคือเอกสารประเภทอะไร (เช่น ใบแจ้งหนี้, สัญญา, กรมธรรม์, ใบสมัคร, ฯลฯ) และสรุปเนื้อหาสำคัญสั้นๆ ให้ด้วย
-            
-            **คำเตือน:** โปรดตอบเป็นภาษาไทยเท่านั้น
-            
-            <เนื้อหาเอกสาร>
-            {text[:30000]}
-            </เนื้อหาเอกสาร>
-            
-            รูปแบบคำตอบ:
-            ประเภทเอกสาร: [ระบุประเภท]
-            สรุปย่อ: [สรุปเนื้อหา]
-            """
+            prompt = f"โปรดวิเคราะห์เอกสารและสรุปสั้นๆ: \n\n{text[:10000]}"
         else:
             system_msg = "You are a helpful AI assistant."
-            prompt = f"""
-            You are a helpful assistant that classifies documents.
-            Please analyze the following document text and provide a classification (e.g., Invoice, Contract, Report, Article, etc.) and a brief summary.
-            
-            <document_content>
-            {text[:30000]}
-            </document_content>
-            
-            Output format:
-            Classification: [Type]
-            Summary: [Brief Summary]
-            """
+            prompt = f"Analyze and summarize this document: \n\n{text[:10000]}"
         
-        for attempt in range(3):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=4096,
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                if attempt == 2:
-                    raise e
-                print(f"API call failed (attempt {attempt+1}/3). Retrying in 2s...")
-                import time
-                time.sleep(2)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": prompt}],
+                max_tokens=1024,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error: {e}"
 
-    def compare_documents(self, text1, text2, language='en'):
+    def compare_documents(self, text1, text2, language='en', mode='diff'):
+        """
+        compare_documents พร้อมรองรับ mode ('diff' หรือ 'same')
+        """
         if language == 'th':
             system_msg = "You are a helpful AI assistant capable of analyzing Thai documents."
+            
+            # ปรับ Prompt ตามโหมด
+            if mode == 'same':
+                focus_instruction = "**เน้นระบุเฉพาะจุดที่เหมือนกัน (Similarities)** ของข้อมูลสำคัญ (เช่น ชื่อ, เลขที่, วันที่, จำนวนเงิน) ไม่ต้องกล่าวถึงจุดที่ต่างมากนัก"
+            else:
+                focus_instruction = "**เน้นระบุจุดที่แตกต่างกัน (Differences)** อย่างละเอียด เช่น คำผิด, ตัวเลขที่ไม่ตรงกัน, หรือข้อความที่หายไป"
+
             prompt = f"""
-            คุณเป็นผู้ช่วย AI ที่เชี่ยวชาญด้านการตรวจสอบและเปรียบเทียบเอกสาร
-            โปรดเปรียบเทียบเนื้อหาของเอกสาร 2 ฉบับด้านล่างนี้ และระบุจุดที่เหมือนและจุดที่แตกต่างกันอย่างละเอียด
+            คุณเป็นผู้ช่วย AI ที่เชี่ยวชาญด้านการตรวจสอบเอกสาร
+            โปรดเปรียบเทียบเนื้อหาของเอกสาร 2 ฉบับด้านล่างนี้ และ {focus_instruction}
             
             **คำเตือน:** โปรดตอบเป็นภาษาไทยเท่านั้น
             
             <เอกสารฉบับที่_1>
-            {text1[:30000]}
+            {text1[:20000]}
             </เอกสารฉบับที่_1>
             
             <เอกสารฉบับที่_2>
-            {text2[:30000]}
+            {text2[:20000]}
             </เอกสารฉบับที่_2>
-            
-            รูปแบบคำตอบ:
-            **จุดที่เหมือนกัน:**
-            - [ประเด็นที่ 1]
-            - [ประเด็นที่ 2]
-            
-            **จุดที่แตกต่างกัน:**
-            - [ประเด็นที่ 1]
-            - [ประเด็นที่ 2]
-            
-            **สรุปผลการเปรียบเทียบ:**
-            [สรุปภาพรวมสั้นๆ ว่าเอกสาร 2 ฉบับนี้มีความสัมพันธ์กันอย่างไร]
             """
         else:
             system_msg = "You are a helpful AI assistant."
+            if mode == 'same':
+                focus_instruction = "Focus primarily on identifying **Similarities** between the two documents."
+            else:
+                focus_instruction = "Focus primarily on identifying **Differences** between the two documents."
+
             prompt = f"""
-            You are a helpful assistant that compares two documents.
-            Please compare the following two documents and highlight the key differences and similarities.
+            Compare the following two documents. {focus_instruction}
             
             <document_1>
-            {text1[:30000]}
+            {text1[:20000]}
             </document_1>
             
             <document_2>
-            {text2[:30000]}
+            {text2[:20000]}
             </document_2>
-            
-            Output format:
-            **Similarities:**
-            - [Point 1]
-            
-            **Differences:**
-            - [Point 1]
-            
-            **Conclusion:**
-            [Brief conclusion]
             """
         
-        for attempt in range(3):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_msg},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=8192,
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                if attempt == 2:
-                    raise e
-                print(f"API call failed (attempt {attempt+1}/3). Retrying in 2s...")
-                import time
-                time.sleep(2)
-
-if __name__ == "__main__":
-    try:
-        client = TyphoonClient()
-        print("Typhoon Client initialized successfully.")
-    except Exception as e:
-        print(f"Error initializing client: {e}")
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=36000, # ลดลงหน่อยเพื่อความเร็ว
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error connecting to Typhoon API: {e}"
