@@ -1,6 +1,6 @@
 import easyocr
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 import os
 import difflib
@@ -69,6 +69,80 @@ def normalize_number(text):
     return re.sub(r'[,.\s]', '', text)
 
 
+def smart_normalize_number(text):
+    """
+    Smart Number Normalization - รองรับหลาย format:
+    - "1,000.00" → "1000.00" → "1000"
+    - "1,000,000" → "1000000"  
+    - "40,000,000.00" → "40000000"
+    - "7.0000" → "7"
+    - "007" → "7"
+    """
+    # ลบ comma และ space
+    normalized = re.sub(r'[,\s]', '', text)
+    
+    # ลอง parse เป็นตัวเลข
+    try:
+        # ถ้ามีจุด อาจเป็นทศนิยม
+        if '.' in normalized:
+            num = float(normalized)
+            # ถ้าเป็นจำนวนเต็ม (เช่น 1000.00) → แปลงเป็น int
+            if num == int(num):
+                return str(int(num))
+            else:
+                # ตัดทศนิยมท้ายที่เป็น 0
+                return f"{num:g}"
+        else:
+            # ลบ leading zeros
+            num = int(normalized)
+            return str(num)
+    except:
+        # ถ้า parse ไม่ได้ ใช้วิธีเดิม
+        return normalized.lstrip('0') or '0'
+
+
+def extract_number_value(text):
+    """
+    แยกค่าตัวเลขจาก text (รองรับ format ต่างๆ)
+    Returns: (numeric_value, original_text) หรือ None ถ้าไม่ใช่ตัวเลข
+    """
+    # ลบ comma และ space
+    clean = re.sub(r'[,\s]', '', text)
+    
+    # ลอง match ตัวเลข (รวมทศนิยม)
+    match = re.match(r'^-?\d+\.?\d*$', clean)
+    if match:
+        try:
+            if '.' in clean:
+                return (float(clean), text)
+            else:
+                return (int(clean), text)
+        except:
+            pass
+    return None
+
+
+def numbers_are_equal(num1_text, num2_text):
+    """
+    เปรียบเทียบตัวเลข 2 ตัวว่าเท่ากันไหม (แม้ format ต่างกัน)
+    เช่น "1,000.00" == "1000" → True
+    """
+    val1 = extract_number_value(num1_text)
+    val2 = extract_number_value(num2_text)
+    
+    if val1 is None or val2 is None:
+        return False
+    
+    # เปรียบเทียบค่า
+    v1, v2 = val1[0], val2[0]
+    
+    # ถ้าเป็น float เปรียบเทียบด้วย tolerance
+    if isinstance(v1, float) or isinstance(v2, float):
+        return abs(float(v1) - float(v2)) < 0.001
+    else:
+        return v1 == v2
+
+
 def is_significant(text):
     """ตรวจสอบว่าคำนี้สำคัญพอที่จะไฮไลท์หรือไม่"""
     clean = clean_text(text)
@@ -116,10 +190,23 @@ def get_words_from_page_ocr(page):
     return words
 
 
+# Global setting สำหรับบังคับใช้ OCR
+FORCE_OCR = True  # เปลี่ยนเป็น False ถ้าต้องการใช้ native text
+
+
 def get_words_all(page):
     """ดึงคำทั้งหมดจากหน้า"""
     if page is None:
         return []
+    
+    # ถ้าบังคับใช้ OCR
+    if FORCE_OCR:
+        print(f"  → Using OCR (forced)...")
+        try:
+            return get_words_from_page_ocr(page)
+        except Exception as e:
+            print(f"  → OCR failed: {e}")
+            return []
     
     words = page.get_text("words")
     
@@ -148,7 +235,7 @@ def get_words_all(page):
     return list(words)
 
 
-def build_word_index(doc):
+def build_word_index(doc, progress_callback=None):
     """สร้าง index ของคำทั้งเอกสาร"""
     index = {
         'by_page': {},
@@ -156,8 +243,9 @@ def build_word_index(doc):
     }
     
     total_words = 0
+    total_pages = len(doc)
     
-    for page_num in range(len(doc)):
+    for page_num in range(total_pages):
         page = doc[page_num]
         words = get_words_all(page)
         index['by_page'][page_num] = words
@@ -168,13 +256,18 @@ def build_word_index(doc):
             clean = clean_text(text)
             if clean and is_significant(text):
                 index['by_word'][clean].append((page_num, word))
+        
+        # Update progress
+        if progress_callback:
+            pct = (page_num + 1) / total_pages * 100
+            progress_callback(f"  → OCR page {page_num + 1}/{total_pages}", pct)
     
     print(f"  → Total words: {total_words}, Unique significant words: {len(index['by_word'])}")
     return index
 
 
 def fuzzy_match_word(word, word_index, threshold=0.70):
-    """หาคำที่คล้ายกันใน index - ปรับปรุงให้จับ match ได้มากขึ้น"""
+    """หาคำที่คล้ายกันใน index"""
     clean = clean_text(word)
     normalized = normalize_for_compare(word)
     
@@ -189,7 +282,7 @@ def fuzzy_match_word(word, word_index, threshold=0.70):
             matches.append((page_num, w, 1.0))
         return matches
     
-    # 2. Check all words
+    # 2. Check all words for text matching
     for indexed_word, locations in word_index['by_word'].items():
         indexed_normalized = normalize_for_compare(indexed_word)
         
@@ -218,32 +311,55 @@ def fuzzy_match_word(word, word_index, threshold=0.70):
     return matches
 
 
-def highlight_text_differences(pdf1_path, pdf2_path, mode='diff'):
+def highlight_text_differences(pdf1_path, pdf2_path, mode='diff', progress_callback=None):
     """Main function สำหรับไฮไลท์"""
+    def update_progress(msg, percent=None):
+        if progress_callback:
+            progress_callback(msg, percent)
+        print(msg)
+    
     if not os.path.exists(pdf1_path) or not os.path.exists(pdf2_path): 
-        return []
+        return [], {}
 
     try:
         doc1 = fitz.open(pdf1_path)
         doc2 = fitz.open(pdf2_path)
     except Exception as e:
         print(f"Error opening PDFs: {e}")
-        return []
+        return [], {}
 
-    print(f"\n📄 Document 1: {os.path.basename(pdf1_path)} ({len(doc1)} pages)")
-    index1 = build_word_index(doc1)
+    total_pages = len(doc1) + len(doc2)
     
-    print(f"\n📄 Document 2: {os.path.basename(pdf2_path)} ({len(doc2)} pages)")
-    index2 = build_word_index(doc2)
+    update_progress(f"\n📄 Document 1: {os.path.basename(pdf1_path)} ({len(doc1)} pages)", 5)
+    index1 = build_word_index(doc1, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.25))
+    
+    update_progress(f"\n📄 Document 2: {os.path.basename(pdf2_path)} ({len(doc2)} pages)", 35)
+    index2 = build_word_index(doc2, progress_callback=lambda msg, pct: update_progress(msg, 35 + pct * 0.25))
+
+    # เก็บ summary statistics
+    summary = {
+        'mode': mode,
+        'doc1_name': os.path.basename(pdf1_path),
+        'doc2_name': os.path.basename(pdf2_path),
+        'doc1_pages': len(doc1),
+        'doc2_pages': len(doc2),
+        'doc1_total_words': sum(len(words) for words in index1['by_page'].values()),
+        'doc2_total_words': sum(len(words) for words in index2['by_page'].values()),
+        'doc1_unique_words': len(index1['by_word']),
+        'doc2_unique_words': len(index2['by_word']),
+    }
 
     if mode == 'same':
-        print(f"\n🟢 Mode: SAME - Highlighting matching words...")
-        highlight_same_mode(doc1, doc2, index1, index2)
+        update_progress(f"\n🟢 Mode: SAME - Highlighting matching words...", 65)
+        stats = highlight_same_mode(doc1, doc2, index1, index2)
+        summary.update(stats)
     else:
-        print(f"\n🔴 Mode: DIFF - Highlighting different words...")
-        highlight_diff_mode(doc1, doc2, index1, index2)
+        update_progress(f"\n🔴 Mode: DIFF - Highlighting different words...", 65)
+        stats = highlight_diff_mode(doc1, doc2, index1, index2)
+        summary.update(stats)
 
-    # Generate Output Images
+    # Generate Output Images พร้อม Legend
+    update_progress("🖼️ Generating output images...", 75)
     images = []
     max_pages = max(len(doc1), len(doc2))
     
@@ -257,13 +373,120 @@ def highlight_text_differences(pdf1_path, pdf2_path, mode='diff'):
         if i < len(doc2):
             pix = doc2[i].get_pixmap(dpi=150)
             img2 = Image.open(io.BytesIO(pix.tobytes("png")))
+        
+        # เพิ่ม Legend เฉพาะหน้าแรก
+        if i == 0:
+            if img1:
+                img1 = add_legend_to_image(img1, mode, 'doc1')
+            if img2:
+                img2 = add_legend_to_image(img2, mode, 'doc2')
             
         images.append((img1, img2))
+        
+        # Update progress for each page
+        img_progress = 75 + (i + 1) / max_pages * 20
+        update_progress(f"  → Generated page {i+1}/{max_pages}", img_progress)
 
     doc1.close()
     doc2.close()
     
-    return images
+    # Print Summary
+    print_summary(summary)
+    update_progress("✅ Comparison complete!", 100)
+    
+    return images, summary
+
+
+def add_legend_to_image(img, mode, doc_side):
+    """เพิ่ม Legend ลงบนรูป"""
+    # สร้าง copy ของรูป
+    img = img.copy()
+    draw = ImageDraw.Draw(img)
+    
+    # ขนาดและตำแหน่ง legend
+    legend_height = 60
+    legend_width = 280
+    margin = 10
+    x = margin
+    y = margin
+    
+    # วาดพื้นหลัง legend
+    draw.rectangle(
+        [x, y, x + legend_width, y + legend_height],
+        fill=(255, 255, 255, 230),
+        outline=(100, 100, 100),
+        width=2
+    )
+    
+    # ใช้ font เริ่มต้น
+    try:
+        font = ImageFont.truetype("arial.ttf", 14)
+        font_small = ImageFont.truetype("arial.ttf", 12)
+    except:
+        font = ImageFont.load_default()
+        font_small = font
+    
+    # วาด Legend ตาม mode
+    if mode == 'same':
+        # สีเขียว = เหมือนกัน
+        draw.rectangle([x + 10, y + 15, x + 30, y + 30], fill=(0, 204, 0))
+        draw.text((x + 40, y + 14), "= Matching content", fill=(0, 0, 0), font=font_small)
+        draw.text((x + 10, y + 38), f"Document: {doc_side.upper()}", fill=(80, 80, 80), font=font_small)
+    else:
+        if doc_side == 'doc1':
+            # Doc1: แดง = มีเฉพาะใน Doc1
+            draw.rectangle([x + 10, y + 15, x + 30, y + 30], fill=(255, 77, 77))
+            draw.text((x + 40, y + 14), "= Only in THIS document", fill=(0, 0, 0), font=font_small)
+        else:
+            # Doc2: เขียว = มีเฉพาะใน Doc2
+            draw.rectangle([x + 10, y + 15, x + 30, y + 30], fill=(77, 204, 77))
+            draw.text((x + 40, y + 14), "= Only in THIS document", fill=(0, 0, 0), font=font_small)
+        
+        draw.text((x + 10, y + 38), f"Document: {doc_side.upper()}", fill=(80, 80, 80), font=font_small)
+    
+    return img
+
+
+def print_summary(summary):
+    """พิมพ์ Summary Report"""
+    print("\n" + "="*60)
+    print("📊 COMPARISON SUMMARY")
+    print("="*60)
+    
+    mode_text = "Finding MATCHES" if summary['mode'] == 'same' else "Finding DIFFERENCES"
+    print(f"Mode: {mode_text}")
+    print("-"*60)
+    
+    print(f"📄 Document 1: {summary['doc1_name']}")
+    print(f"   Pages: {summary['doc1_pages']}, Words: {summary['doc1_total_words']}, Unique: {summary['doc1_unique_words']}")
+    
+    print(f"📄 Document 2: {summary['doc2_name']}")
+    print(f"   Pages: {summary['doc2_pages']}, Words: {summary['doc2_total_words']}, Unique: {summary['doc2_unique_words']}")
+    
+    print("-"*60)
+    
+    if summary['mode'] == 'same':
+        print(f"✅ Matching words in Doc1: {summary.get('matched_doc1', 0)}")
+        print(f"✅ Matching words in Doc2: {summary.get('matched_doc2', 0)}")
+        
+        # คำนวณ % match
+        if summary['doc1_unique_words'] > 0:
+            match_pct = (summary.get('matched_doc1', 0) / summary['doc1_unique_words']) * 100
+            print(f"📈 Match rate: {match_pct:.1f}%")
+    else:
+        print(f"🔴 Words only in Doc1: {summary.get('diff_doc1', 0)}")
+        print(f"🟢 Words only in Doc2: {summary.get('diff_doc2', 0)}")
+        print(f"📝 Sample differences Doc1: {summary.get('sample_doc1', [])[:5]}")
+        print(f"📝 Sample differences Doc2: {summary.get('sample_doc2', [])[:5]}")
+        
+        # คำนวณ % diff
+        total_unique = summary['doc1_unique_words'] + summary['doc2_unique_words']
+        if total_unique > 0:
+            diff_count = summary.get('diff_doc1', 0) + summary.get('diff_doc2', 0)
+            diff_pct = (diff_count / total_unique) * 100
+            print(f"📈 Difference rate: {diff_pct:.1f}%")
+    
+    print("="*60 + "\n")
 
 
 def highlight_same_mode(doc1, doc2, index1, index2):
@@ -272,12 +495,19 @@ def highlight_same_mode(doc1, doc2, index1, index2):
     
     matched_in_doc1 = set()
     matched_in_doc2 = set()
+    matched_words = []
+    
+    # Debug: แสดงตัวอย่างคำใน index
+    sample_words1 = list(index1['by_word'].keys())[:10]
+    sample_words2 = list(index2['by_word'].keys())[:10]
+    print(f"  → Sample words in Doc1: {sample_words1}")
+    print(f"  → Sample words in Doc2: {sample_words2}")
     
     for clean_word, locations1 in index1['by_word'].items():
-        # ลด threshold เป็น 0.70 เพื่อจับ match ได้มากขึ้น
-        matches_in_doc2 = fuzzy_match_word(clean_word, index2, threshold=0.70)
-        
-        if matches_in_doc2:
+        # ลองหา exact match ก่อน
+        if clean_word in index2['by_word']:
+            matched_words.append(clean_word)
+            
             # ไฮไลท์ใน doc1
             for page_num, word in locations1:
                 word_id = (page_num, word[0], word[1], word[4])
@@ -288,88 +518,91 @@ def highlight_same_mode(doc1, doc2, index1, index2):
                     page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
             
             # ไฮไลท์ใน doc2
-            for page_num, word, score in matches_in_doc2:
+            for page_num, word in index2['by_word'][clean_word]:
                 word_id = (page_num, word[0], word[1], word[4])
                 if word_id not in matched_in_doc2:
                     matched_in_doc2.add(word_id)
                     page = doc2[page_num]
                     rect = fitz.Rect(word[:4])
                     page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
+        else:
+            # ลอง fuzzy match (ลด threshold เป็น 0.60 สำหรับภาษาไทย)
+            matches_in_doc2 = fuzzy_match_word(clean_word, index2, threshold=0.60)
+            
+            if matches_in_doc2:
+                matched_words.append(clean_word)
+                
+                # ไฮไลท์ใน doc1
+                for page_num, word in locations1:
+                    word_id = (page_num, word[0], word[1], word[4])
+                    if word_id not in matched_in_doc1:
+                        matched_in_doc1.add(word_id)
+                        page = doc1[page_num]
+                        rect = fitz.Rect(word[:4])
+                        page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
+                
+                # ไฮไลท์ใน doc2
+                for page_num, word, score in matches_in_doc2:
+                    word_id = (page_num, word[0], word[1], word[4])
+                    if word_id not in matched_in_doc2:
+                        matched_in_doc2.add(word_id)
+                        page = doc2[page_num]
+                        rect = fitz.Rect(word[:4])
+                        page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
     
+    print(f"  → Matched unique words: {len(matched_words)}")
+    print(f"  → Sample matched: {matched_words[:10]}")
     print(f"  → Highlighted {len(matched_in_doc1)} words in Doc1, {len(matched_in_doc2)} words in Doc2")
+    
+    return {
+        'matched_doc1': len(matched_in_doc1),
+        'matched_doc2': len(matched_in_doc2),
+        'matched_unique_words': len(matched_words),
+        'sample_matched': matched_words[:10]
+    }
 
 
 def highlight_diff_mode(doc1, doc2, index1, index2):
-    """โหมด DIFF: ไฮไลท์คำที่แตกต่างกัน - แบบเรียบง่าย"""
+    """โหมด DIFF: ไฮไลท์คำที่แตกต่างกัน - ใช้ Exact Match สำหรับตัวเลข"""
     RED = (1, 0.3, 0.3)       # มีใน Doc1 แต่ไม่มีใน Doc2
     GREEN = (0.3, 0.8, 0.3)   # มีใน Doc2 แต่ไม่มีใน Doc1
     
-    # สร้าง set ของคำที่ normalized แล้ว สำหรับทั้ง 2 doc
-    def get_normalized_words(index):
-        """สร้าง set ของคำที่ normalized แล้ว"""
-        words = set()
-        for clean_word in index['by_word'].keys():
-            words.add(clean_word)
-            # ถ้าเป็นตัวเลข เพิ่ม normalized version ด้วย
-            if any(c.isdigit() for c in clean_word):
-                # ลบ leading zeros
-                normalized = clean_word.lstrip('0') or '0'
-                words.add(normalized)
-        return words
-    
-    normalized1 = get_normalized_words(index1)
-    normalized2 = get_normalized_words(index2)
+    # สร้าง set ของคำ
+    words1 = set(index1['by_word'].keys())
+    words2 = set(index2['by_word'].keys())
     
     words_only_in_doc1 = set()
     words_only_in_doc2 = set()
     
     # หาคำที่มีเฉพาะใน Doc1
-    for clean_word in index1['by_word'].keys():
-        # ตรวจสอบ exact match
-        if clean_word in normalized2:
+    for clean_word in words1:
+        # Exact match ก่อน
+        if clean_word in words2:
             continue
         
-        # ตรวจสอบ normalized number match
+        # ถ้าเป็นตัวเลข → ใช้ exact match เท่านั้น (ไม่ fuzzy)
         if any(c.isdigit() for c in clean_word):
-            normalized = clean_word.lstrip('0') or '0'
-            if normalized in normalized2:
-                continue
-        
-        # ตรวจสอบ fuzzy match สำหรับคำที่ไม่ใช่ตัวเลข
-        if not any(c.isdigit() for c in clean_word):
+            words_only_in_doc1.add(clean_word)
+        else:
+            # ถ้าไม่ใช่ตัวเลข → ลอง fuzzy match
             matches = fuzzy_match_word(clean_word, index2, threshold=0.80)
-            if matches:
-                continue
-        
-        words_only_in_doc1.add(clean_word)
+            if not matches:
+                words_only_in_doc1.add(clean_word)
     
     # หาคำที่มีเฉพาะใน Doc2
-    for clean_word in index2['by_word'].keys():
-        if clean_word in normalized1:
+    for clean_word in words2:
+        if clean_word in words1:
             continue
         
         if any(c.isdigit() for c in clean_word):
-            normalized = clean_word.lstrip('0') or '0'
-            if normalized in normalized1:
-                continue
-        
-        if not any(c.isdigit() for c in clean_word):
+            words_only_in_doc2.add(clean_word)
+        else:
             matches = fuzzy_match_word(clean_word, index1, threshold=0.80)
-            if matches:
-                continue
-        
-        words_only_in_doc2.add(clean_word)
+            if not matches:
+                words_only_in_doc2.add(clean_word)
     
     print(f"  → Words only in Doc1: {len(words_only_in_doc1)}")
     print(f"  → Words only in Doc2: {len(words_only_in_doc2)}")
-    
-    # Debug: แสดงตัวอย่างคำที่ต่าง
-    if words_only_in_doc1:
-        sample1 = list(words_only_in_doc1)[:5]
-        print(f"  → Sample Doc1: {sample1}")
-    if words_only_in_doc2:
-        sample2 = list(words_only_in_doc2)[:5]
-        print(f"  → Sample Doc2: {sample2}")
     
     # ไฮไลท์ Doc1 (แดง)
     count1 = 0
@@ -390,3 +623,12 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
             count2 += 1
     
     print(f"  → Highlighted {count1} in Doc1 (red), {count2} in Doc2 (green)")
+    
+    return {
+        'diff_doc1': len(words_only_in_doc1),
+        'diff_doc2': len(words_only_in_doc2),
+        'highlighted_doc1': count1,
+        'highlighted_doc2': count2,
+        'sample_doc1': list(words_only_in_doc1)[:10],
+        'sample_doc2': list(words_only_in_doc2)[:10]
+    }

@@ -25,10 +25,11 @@ class App(ctk.CTk):
         self.pdf1_path = ""
         self.pdf2_path = ""
         self.generated_image_pairs = []
+        self.comparison_summary = {}  # เก็บ summary
 
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(4, weight=1) 
-        self.grid_rowconfigure(6, weight=1)
+        self.grid_rowconfigure(5, weight=1) 
+        self.grid_rowconfigure(7, weight=1)
 
         # PDF 1
         self.label1 = ctk.CTkLabel(self, text="PDF 1 not selected", fg_color="transparent")
@@ -53,25 +54,36 @@ class App(ctk.CTk):
         self.lang_combobox.pack(side="left", padx=(0, 20))
         self.lang_combobox.set("Thai (ภาษาไทย)")
 
-        # Mode Selection (เพิ่มใหม่ตรงนี้)
+        # Mode Selection
         self.mode_label = ctk.CTkLabel(self.settings_frame, text="Mode:")
         self.mode_label.pack(side="left", padx=(0, 10))
         self.mode_var = ctk.StringVar(value="diff")
         self.mode_switch = ctk.CTkSegmentedButton(self.settings_frame, values=["Find Differences", "Find Matches"], variable=self.mode_var)
         self.mode_switch.pack(side="left")
-        self.mode_switch.set("Find Differences") # Default
+        self.mode_switch.set("Find Differences")
 
         # Run Button
         self.run_btn = ctk.CTkButton(self, text="Compare Documents", command=self.start_processing, height=40, font=("Arial", 14, "bold"))
         self.run_btn.grid(row=3, column=0, columnspan=2, padx=20, pady=15)
 
+        # Progress Bar Frame
+        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.progress_frame.grid(row=4, column=0, columnspan=2, padx=20, pady=5, sticky="ew")
+        
+        self.progress_label = ctk.CTkLabel(self.progress_frame, text="Ready", anchor="w")
+        self.progress_label.pack(fill="x", padx=5)
+        
+        self.progress_bar = ctk.CTkProgressBar(self.progress_frame, height=20)
+        self.progress_bar.pack(fill="x", padx=5, pady=5)
+        self.progress_bar.set(0)
+
         # Text Output
-        self.textbox = ctk.CTkTextbox(self, width=760, height=200) 
-        self.textbox.grid(row=4, column=0, columnspan=2, padx=20, pady=5, sticky="nsew")
+        self.textbox = ctk.CTkTextbox(self, width=760, height=180) 
+        self.textbox.grid(row=5, column=0, columnspan=2, padx=20, pady=5, sticky="nsew")
 
         # Action Buttons
         self.action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.action_frame.grid(row=5, column=0, columnspan=2, padx=20, pady=5)
+        self.action_frame.grid(row=6, column=0, columnspan=2, padx=20, pady=5)
 
         self.save_txt_btn = ctk.CTkButton(self.action_frame, text="Save Text Result", command=self.save_result, state="disabled")
         self.save_txt_btn.pack(side="left", padx=10)
@@ -81,7 +93,7 @@ class App(ctk.CTk):
 
         # Visual Result
         self.visual_frame = ctk.CTkScrollableFrame(self, label_text="Visual Comparison", height=300)
-        self.visual_frame.grid(row=6, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
+        self.visual_frame.grid(row=7, column=0, columnspan=2, padx=20, pady=10, sticky="nsew")
 
     def select_pdf1(self):
         filename = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
@@ -103,13 +115,14 @@ class App(ctk.CTk):
         selected_lang_str = self.lang_combobox.get()
         lang_code = 'th' if "Thai" in selected_lang_str else 'en'
         
-        # ตรวจสอบ Mode ที่เลือก
         mode_ui = self.mode_var.get()
         mode_val = 'same' if mode_ui == "Find Matches" else 'diff'
 
         self.run_btn.configure(state="disabled")
         self.export_pdf_btn.configure(state="disabled")
         self.textbox.delete("1.0", "end")
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="Starting...")
         self.append_text(f"Starting processing... (Mode: {mode_ui})\n")
         
         thread = threading.Thread(target=self.process_thread, args=(lang_code, mode_val))
@@ -117,21 +130,93 @@ class App(ctk.CTk):
 
     def process_thread(self, lang_code, mode_val):
         try:
+            # Reset progress
+            self.after(0, lambda: self.progress_bar.set(0))
+            self.after(0, lambda: self.progress_label.configure(text="Starting..."))
+            
             # 1. ส่ง mode ไปที่ LLM
             result = process_files(self.pdf1_path, self.pdf2_path, language=lang_code, mode=mode_val, progress_callback=self.update_progress)
             self.enable_save()
             
-            # 2. ส่ง mode ไปที่ Image Highlight
-            self.update_progress("Generating visual highlights...")
-            self.generated_image_pairs = highlight_text_differences(self.pdf1_path, self.pdf2_path, mode=mode_val)
+            # 2. ส่ง mode ไปที่ Image Highlight พร้อม progress callback
+            self.update_progress("\nGenerating visual highlights...")
+            self.after(0, lambda: self.progress_label.configure(text="Generating visual highlights..."))
+            
+            def visual_progress(msg, percent=None):
+                self.update_progress(msg)
+                if percent is not None:
+                    self.after(0, lambda p=percent: self.progress_bar.set(p / 100))
+                    self.after(0, lambda m=msg: self.progress_label.configure(text=m))
+            
+            result = highlight_text_differences(self.pdf1_path, self.pdf2_path, mode=mode_val, progress_callback=visual_progress)
+            
+            # รองรับทั้ง return แบบเก่า (list) และแบบใหม่ (tuple)
+            if isinstance(result, tuple):
+                self.generated_image_pairs, self.comparison_summary = result
+            else:
+                self.generated_image_pairs = result
+                self.comparison_summary = {}
+            
+            # แสดง Summary ใน textbox
+            if self.comparison_summary:
+                self.after(0, self.display_summary, self.comparison_summary)
             
             self.after(0, self.display_images, self.generated_image_pairs)
-            self.update_progress("Visual comparison ready.")
+            self.update_progress("\n✅ Visual comparison ready!")
+            self.after(0, lambda: self.progress_bar.set(1))
+            self.after(0, lambda: self.progress_label.configure(text="✅ Complete!"))
             
         except Exception as e:
             self.update_progress(f"An error occurred: {e}")
+            self.after(0, lambda: self.progress_label.configure(text=f"❌ Error: {e}"))
+            import traceback
+            traceback.print_exc()
         finally:
-            self.run_btn.configure(state="normal")
+            self.after(0, lambda: self.run_btn.configure(state="normal"))
+
+    def display_summary(self, summary):
+        """แสดง Summary ใน textbox"""
+        self.append_text("\n" + "="*60 + "\n")
+        self.append_text("📊 COMPARISON SUMMARY\n")
+        self.append_text("="*60 + "\n")
+        
+        mode_text = "Finding MATCHES" if summary.get('mode') == 'same' else "Finding DIFFERENCES"
+        self.append_text(f"Mode: {mode_text}\n")
+        self.append_text("-"*60 + "\n")
+        
+        self.append_text(f"📄 Document 1: {summary.get('doc1_name', 'N/A')}\n")
+        self.append_text(f"   Pages: {summary.get('doc1_pages', 0)}, Words: {summary.get('doc1_total_words', 0)}, Unique: {summary.get('doc1_unique_words', 0)}\n")
+        
+        self.append_text(f"📄 Document 2: {summary.get('doc2_name', 'N/A')}\n")
+        self.append_text(f"   Pages: {summary.get('doc2_pages', 0)}, Words: {summary.get('doc2_total_words', 0)}, Unique: {summary.get('doc2_unique_words', 0)}\n")
+        
+        self.append_text("-"*60 + "\n")
+        
+        if summary.get('mode') == 'same':
+            self.append_text(f"✅ Matching words in Doc1: {summary.get('matched_doc1', 0)}\n")
+            self.append_text(f"✅ Matching words in Doc2: {summary.get('matched_doc2', 0)}\n")
+            
+            if summary.get('doc1_unique_words', 0) > 0:
+                match_pct = (summary.get('matched_doc1', 0) / summary.get('doc1_unique_words', 1)) * 100
+                self.append_text(f"📈 Match rate: {match_pct:.1f}%\n")
+        else:
+            self.append_text(f"🔴 Words only in Doc1: {summary.get('diff_doc1', 0)}\n")
+            self.append_text(f"🟢 Words only in Doc2: {summary.get('diff_doc2', 0)}\n")
+            
+            sample1 = summary.get('sample_doc1', [])[:5]
+            sample2 = summary.get('sample_doc2', [])[:5]
+            if sample1:
+                self.append_text(f"📝 Sample Doc1: {sample1}\n")
+            if sample2:
+                self.append_text(f"📝 Sample Doc2: {sample2}\n")
+            
+            total_unique = summary.get('doc1_unique_words', 0) + summary.get('doc2_unique_words', 0)
+            if total_unique > 0:
+                diff_count = summary.get('diff_doc1', 0) + summary.get('diff_doc2', 0)
+                diff_pct = (diff_count / total_unique) * 100
+                self.append_text(f"📈 Difference rate: {diff_pct:.1f}%\n")
+        
+        self.append_text("="*60 + "\n")
             
     def display_images(self, image_pairs):
         for widget in self.visual_frame.winfo_children():
@@ -156,7 +241,6 @@ class App(ctk.CTk):
                 img_lbl2.bind("<Button-1>", on_click)
 
     def open_sync_window(self, img1, img2, page_num):
-        # (ฟังก์ชันนี้เหมือนเดิม 100% ไม่ต้องแก้ครับ แต่ใส่มาให้ครบเพื่อให้รันได้เลย)
         if not img1 and not img2: return
 
         top = ctk.CTkToplevel(self)
@@ -193,7 +277,6 @@ class App(ctk.CTk):
         save_btn = ctk.CTkButton(toolbar, text="Save Image", command=save_current_view)
         save_btn.pack(side="right", padx=10)
 
-        # View Setup
         target_width = (window_width // 2) - 40 
         def resize_to_fit(pil_img, target_w):
             if not pil_img: return None
@@ -241,7 +324,6 @@ class App(ctk.CTk):
         def draw_img(canvas, pil_img):
             if not pil_img: return
             tk_img = ImageTk.PhotoImage(pil_img)
-            # ต้องเก็บ ref ไว้ไม่งั้นรูปหาย
             if not hasattr(top, 'tk_images'): top.tk_images = []
             top.tk_images.append(tk_img)
             canvas.create_image(0, 0, anchor="nw", image=tk_img)
@@ -272,7 +354,6 @@ class App(ctk.CTk):
                 pass
 
     def export_pdf_report(self):
-        # (Logic Export เหมือนเดิม - copy logic จากโค้ดเก่าได้เลยครับ)
         if not self.generated_image_pairs: return
         file_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF File", "*.pdf")])
         if not file_path: return
@@ -287,9 +368,7 @@ class App(ctk.CTk):
                 c.setFont("Helvetica", 12)
             
             c.drawString(20*mm, height - 20*mm, f"Comparison Report (Mode: {self.mode_var.get()})")
-            # ... (ส่วนวาด text) ...
             c.showPage()
-            # ... (ส่วนวาดรูป) ...
             c.save()
             messagebox.showinfo("Success", "Saved")
         except Exception as e:
