@@ -1,0 +1,37 @@
+# PDF Compare - Requirements
+# Compatible with macOS, Windows, and Linux
+
+# OCR Engine
+easyocr>=1.7.0
+
+# PDF Processing
+PyMuPDF>=1.23.0
+
+# Image Processing
+Pillow>=10.0.0
+numpy>=1.24.0
+opencv-python-headless>=4.8.0
+
+# Machine Learning (PyTorch)
+# For macOS (Intel/Apple Silicon) - use CPU version
+# For Windows/Linux with NVIDIA GPU - can use CUDA version
+torch>=2.0.0
+torchvision>=0.15.0
+
+# GUI
+customtkinter>=5.2.0
+
+# Database (Supabase)
+supabase>=2.0.0
+
+# LLM API
+openai>=1.0.0
+
+# Environment Variables
+python-dotenv>=1.0.0
+
+# PDF Generation
+reportlab>=4.0.0
+
+# Utilities
+tqdm>=4.65.0

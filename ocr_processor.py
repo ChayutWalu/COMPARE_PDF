@@ -9,6 +9,16 @@ import numpy as np
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import platform
+
+# =====================================================
+# Platform Detection - รองรับ macOS, Windows, Linux
+# =====================================================
+IS_MAC = platform.system() == 'Darwin'
+IS_WINDOWS = platform.system() == 'Windows'
+IS_LINUX = platform.system() == 'Linux'
+
+print(f"🖥️  Platform: {platform.system()} ({platform.machine()})")
 
 # Lock สำหรับ thread-safe OCR
 ocr_lock = threading.Lock()
@@ -24,13 +34,26 @@ STOPWORDS = {
 }
 # หมายเหตุ: ลบ "คุณ" ออกจาก STOPWORDS เพราะมักติดกับชื่อคน
 
-print("Initializing EasyOCR with GPU...")
-try:
-    reader = easyocr.Reader(['th', 'en'], gpu=True)
-    print("✅ EasyOCR initialized with GPU")
-except:
+# =====================================================
+# EasyOCR Initialization - Auto-detect GPU/CPU by platform
+# =====================================================
+print("Initializing EasyOCR...")
+
+if IS_MAC:
+    # macOS: ใช้ CPU เสมอ (MPS ยังไม่ stable กับ EasyOCR)
+    print("🍎 macOS detected - Using CPU mode")
     reader = easyocr.Reader(['th', 'en'], gpu=False)
     print("✅ EasyOCR initialized with CPU")
+else:
+    # Windows/Linux: ลองใช้ CUDA GPU ก่อน
+    print("Checking for CUDA GPU...")
+    try:
+        reader = easyocr.Reader(['th', 'en'], gpu=True)
+        print("✅ EasyOCR initialized with GPU (CUDA)")
+    except Exception as e:
+        print(f"⚠️ GPU not available: {e}")
+        reader = easyocr.Reader(['th', 'en'], gpu=False)
+        print("✅ EasyOCR initialized with CPU (fallback)")
 
 
 def extract_text_from_pdf(pdf_path):
@@ -256,10 +279,22 @@ def process_page_ocr(args):
         return page_num, []
 
 
-# Global settings
+# =====================================================
+# Global Settings - Auto-configure based on platform
+# =====================================================
 FORCE_OCR = True  # เปลี่ยนเป็น False ถ้าต้องการใช้ native text
-PARALLEL_OCR = True  # เปิดใช้ parallel OCR
-MAX_OCR_WORKERS = 2  # จำนวน workers (ไม่ควรเกิน 2-3 เพราะ OCR หนัก)
+
+# Parallel OCR settings - ปรับตาม platform
+if IS_MAC:
+    # macOS: ปิด parallel เพราะอาจมี threading issues
+    PARALLEL_OCR = False
+    MAX_OCR_WORKERS = 1
+    print("⚙️  Parallel OCR: Disabled (macOS)")
+else:
+    # Windows/Linux: เปิด parallel ได้
+    PARALLEL_OCR = True
+    MAX_OCR_WORKERS = 2
+    print(f"⚙️  Parallel OCR: Enabled ({MAX_OCR_WORKERS} workers)")
 
 
 def get_words_all(page):
@@ -794,11 +829,32 @@ def add_legend_to_image(img, mode, doc_side):
         width=2
     )
     
-    # ใช้ font เริ่มต้น
+    # ใช้ font ตาม platform
+    font = None
+    font_small = None
+    
     try:
-        font = ImageFont.truetype("arial.ttf", 14)
-        font_small = ImageFont.truetype("arial.ttf", 12)
+        if IS_MAC:
+            # macOS: ใช้ Thai font ที่มีในระบบ
+            mac_fonts = [
+                "/System/Library/Fonts/Supplemental/Thonburi.ttc",
+                "/System/Library/Fonts/Thonburi.ttc",
+                "/System/Library/Fonts/Helvetica.ttc",
+            ]
+            for font_path in mac_fonts:
+                if os.path.exists(font_path):
+                    font = ImageFont.truetype(font_path, 14)
+                    font_small = ImageFont.truetype(font_path, 12)
+                    break
+        else:
+            # Windows/Linux: ใช้ Arial
+            font = ImageFont.truetype("arial.ttf", 14)
+            font_small = ImageFont.truetype("arial.ttf", 12)
     except:
+        pass
+    
+    # Fallback to default font
+    if font is None:
         font = ImageFont.load_default()
         font_small = font
     
