@@ -7,6 +7,11 @@ import difflib
 import re
 import numpy as np
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+# Lock สำหรับ thread-safe OCR
+ocr_lock = threading.Lock()
 
 # --- STOPWORDS (ลดลงเหลือแค่คำที่ไม่สำคัญจริงๆ) ---
 STOPWORDS = {
@@ -17,6 +22,7 @@ STOPWORDS = {
     "road", "soi", "district", "province",
     "the", "a", "an", "is", "are", "of", "to", "in", "for", "on", "with"
 }
+# หมายเหตุ: ลบ "คุณ" ออกจาก STOPWORDS เพราะมักติดกับชื่อคน
 
 print("Initializing EasyOCR with GPU...")
 try:
@@ -59,8 +65,19 @@ def clean_text(text):
     return text.lower().strip()
 
 
+def normalize_thai_tones(text):
+    """
+    ลบวรรณยุกต์ไทยเพื่อเปรียบเทียบ
+    เช่น "ค่าย" → "คาย", "บ้าน" → "บาน"
+    """
+    thai_tones = '\u0E48\u0E49\u0E4A\u0E4B'  # ่ ้ ๊ ๋
+    for tone in thai_tones:
+        text = text.replace(tone, '')
+    return text
+
+
 def normalize_for_compare(text):
-    """Normalize text สำหรับเปรียบเทียบ - ลบ space ทั้งหมด"""
+    """Normalize text สำหรับเปรียบเทียบ - ลบ space ทั้งหมด (ไม่ลบวรรณยุกต์)"""
     return re.sub(r'\s+', '', clean_text(text))
 
 
@@ -162,12 +179,19 @@ def is_significant(text):
     return False
 
 
+def ocr_single_image(img_np):
+    """OCR รูปเดียว - thread-safe ด้วย lock"""
+    with ocr_lock:
+        return reader.readtext(img_np)
+
+
 def get_words_from_page_ocr(page):
     """ดึงคำและพิกัดด้วย EasyOCR"""
     pix = page.get_pixmap(dpi=300) 
     img_np = np.array(Image.open(io.BytesIO(pix.tobytes("png"))))
     
-    results = reader.readtext(img_np)
+    # ใช้ thread-safe OCR
+    results = ocr_single_image(img_np)
     words = []
     
     scale_x = page.rect.width / pix.width
@@ -190,8 +214,52 @@ def get_words_from_page_ocr(page):
     return words
 
 
-# Global setting สำหรับบังคับใช้ OCR
+def process_page_ocr(args):
+    """Process single page สำหรับ parallel OCR"""
+    page_num, pdf_path, page_rect_width, page_rect_height = args
+    
+    try:
+        # เปิด PDF ใหม่ใน thread นี้
+        doc = fitz.open(pdf_path)
+        page = doc[page_num]
+        
+        pix = page.get_pixmap(dpi=300)
+        img_np = np.array(Image.open(io.BytesIO(pix.tobytes("png"))))
+        
+        # OCR with lock
+        results = ocr_single_image(img_np)
+        
+        words = []
+        scale_x = page.rect.width / pix.width
+        scale_y = page.rect.height / pix.height
+        
+        for (bbox, text, prob) in results:
+            if prob > 0.2 and text.strip():
+                (tl, tr, br, bl) = bbox
+                x_min = min(tl[0], bl[0])
+                y_min = min(tl[1], tr[1])
+                x_max = max(tr[0], br[0])
+                y_max = max(bl[1], br[1])
+                
+                x0 = x_min * scale_x
+                y0 = y_min * scale_y
+                x1 = x_max * scale_x
+                y1 = y_max * scale_y
+                
+                words.append((x0, y0, x1, y1, text, 0, 0, 0))
+        
+        doc.close()
+        return page_num, words
+        
+    except Exception as e:
+        print(f"  → OCR failed for page {page_num}: {e}")
+        return page_num, []
+
+
+# Global settings
 FORCE_OCR = True  # เปลี่ยนเป็น False ถ้าต้องการใช้ native text
+PARALLEL_OCR = True  # เปิดใช้ parallel OCR
+MAX_OCR_WORKERS = 2  # จำนวน workers (ไม่ควรเกิน 2-3 เพราะ OCR หนัก)
 
 
 def get_words_all(page):
@@ -201,7 +269,6 @@ def get_words_all(page):
     
     # ถ้าบังคับใช้ OCR
     if FORCE_OCR:
-        print(f"  → Using OCR (forced)...")
         try:
             return get_words_from_page_ocr(page)
         except Exception as e:
@@ -235,8 +302,57 @@ def get_words_all(page):
     return list(words)
 
 
+def build_word_index_parallel(pdf_path, progress_callback=None):
+    """สร้าง index ด้วย parallel OCR"""
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    
+    index = {
+        'by_page': {},
+        'by_word': defaultdict(list)
+    }
+    
+    if progress_callback:
+        progress_callback(f"  → Starting parallel OCR ({MAX_OCR_WORKERS} workers)...", 0)
+    
+    # เตรียม arguments สำหรับแต่ละหน้า
+    page_args = []
+    for page_num in range(total_pages):
+        page = doc[page_num]
+        page_args.append((page_num, pdf_path, page.rect.width, page.rect.height))
+    
+    doc.close()
+    
+    # ใช้ ThreadPoolExecutor สำหรับ parallel OCR
+    total_words = 0
+    completed = 0
+    
+    with ThreadPoolExecutor(max_workers=MAX_OCR_WORKERS) as executor:
+        futures = {executor.submit(process_page_ocr, args): args[0] for args in page_args}
+        
+        for future in as_completed(futures):
+            page_num, words = future.result()
+            index['by_page'][page_num] = words
+            total_words += len(words)
+            
+            # Build word index
+            for word in words:
+                text = word[4]
+                clean = clean_text(text)
+                if clean and is_significant(text):
+                    index['by_word'][clean].append((page_num, word))
+            
+            completed += 1
+            if progress_callback:
+                pct = completed / total_pages * 100
+                progress_callback(f"  → OCR page {completed}/{total_pages} done", pct)
+    
+    print(f"  → Total words: {total_words}, Unique significant words: {len(index['by_word'])}")
+    return index
+
+
 def build_word_index(doc, progress_callback=None):
-    """สร้าง index ของคำทั้งเอกสาร"""
+    """สร้าง index ของคำทั้งเอกสาร (sequential)"""
     index = {
         'by_page': {},
         'by_word': defaultdict(list)
@@ -267,9 +383,10 @@ def build_word_index(doc, progress_callback=None):
 
 
 def fuzzy_match_word(word, word_index, threshold=0.70):
-    """หาคำที่คล้ายกันใน index"""
+    """หาคำที่คล้ายกันใน index - รองรับภาษาไทยที่ OCR อ่านวรรณยุกต์ต่างกัน"""
     clean = clean_text(word)
     normalized = normalize_for_compare(word)
+    normalized_no_tone = normalize_thai_tones(normalized)  # ลบวรรณยุกต์
     
     if not clean or len(clean) < 2:
         return []
@@ -285,21 +402,35 @@ def fuzzy_match_word(word, word_index, threshold=0.70):
     # 2. Check all words for text matching
     for indexed_word, locations in word_index['by_word'].items():
         indexed_normalized = normalize_for_compare(indexed_word)
+        indexed_no_tone = normalize_thai_tones(indexed_normalized)  # ลบวรรณยุกต์
         
-        # 2a. Normalized exact match
+        # 2a. Normalized exact match (รวมวรรณยุกต์)
         if normalized == indexed_normalized:
             for page_num, w in locations:
                 matches.append((page_num, w, 0.95))
             continue
         
-        # 2b. Substring match (คำหนึ่งอยู่ในอีกคำ)
+        # 2b. Match หลังลบวรรณยุกต์ (สำหรับ OCR ที่อ่านวรรณยุกต์ต่างกัน)
+        if normalized_no_tone == indexed_no_tone:
+            for page_num, w in locations:
+                matches.append((page_num, w, 0.93))
+            continue
+        
+        # 2c. Substring match (คำหนึ่งอยู่ในอีกคำ)
         if len(normalized) >= 3 and len(indexed_normalized) >= 3:
             if normalized in indexed_normalized or indexed_normalized in normalized:
                 for page_num, w in locations:
                     matches.append((page_num, w, 0.85))
                 continue
         
-        # 2c. Fuzzy match
+        # 2d. Substring match หลังลบวรรณยุกต์
+        if len(normalized_no_tone) >= 3 and len(indexed_no_tone) >= 3:
+            if normalized_no_tone in indexed_no_tone or indexed_no_tone in normalized_no_tone:
+                for page_num, w in locations:
+                    matches.append((page_num, w, 0.83))
+                continue
+        
+        # 2e. Fuzzy match
         if abs(len(indexed_word) - len(clean)) > max(len(clean) * 0.5, 3):
             continue
             
@@ -329,12 +460,27 @@ def highlight_text_differences(pdf1_path, pdf2_path, mode='diff', progress_callb
         return [], {}
 
     total_pages = len(doc1) + len(doc2)
+    doc1_pages = len(doc1)
+    doc2_pages = len(doc2)
     
-    update_progress(f"\n📄 Document 1: {os.path.basename(pdf1_path)} ({len(doc1)} pages)", 5)
-    index1 = build_word_index(doc1, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.25))
+    # Build word index (รองรับ parallel)
+    update_progress(f"\n📄 Document 1: {os.path.basename(pdf1_path)} ({doc1_pages} pages)", 5)
     
-    update_progress(f"\n📄 Document 2: {os.path.basename(pdf2_path)} ({len(doc2)} pages)", 35)
-    index2 = build_word_index(doc2, progress_callback=lambda msg, pct: update_progress(msg, 35 + pct * 0.25))
+    if PARALLEL_OCR and FORCE_OCR and doc1_pages > 1:
+        doc1.close()
+        index1 = build_word_index_parallel(pdf1_path, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.25))
+        doc1 = fitz.open(pdf1_path)  # เปิดใหม่สำหรับ highlight
+    else:
+        index1 = build_word_index(doc1, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.25))
+    
+    update_progress(f"\n📄 Document 2: {os.path.basename(pdf2_path)} ({doc2_pages} pages)", 35)
+    
+    if PARALLEL_OCR and FORCE_OCR and doc2_pages > 1:
+        doc2.close()
+        index2 = build_word_index_parallel(pdf2_path, progress_callback=lambda msg, pct: update_progress(msg, 35 + pct * 0.25))
+        doc2 = fitz.open(pdf2_path)  # เปิดใหม่สำหรับ highlight
+    else:
+        index2 = build_word_index(doc2, progress_callback=lambda msg, pct: update_progress(msg, 35 + pct * 0.25))
 
     # เก็บ summary statistics
     summary = {
@@ -395,6 +541,236 @@ def highlight_text_differences(pdf1_path, pdf2_path, mode='diff', progress_callb
     update_progress("✅ Comparison complete!", 100)
     
     return images, summary
+
+
+def highlight_text_differences_db(pdf_path, db_document, mode='diff', progress_callback=None):
+    """
+    Compare a PDF file against a document stored in database
+    
+    Args:
+        pdf_path: Path to the PDF file to compare
+        db_document: Document dict from database with 'word_index', 'extracted_text', etc.
+        mode: 'diff' or 'same'
+        progress_callback: Optional progress callback
+    
+    Returns:
+        Tuple of (image_pairs, summary_dict)
+    """
+    def update_progress(msg, percent=None):
+        if progress_callback:
+            progress_callback(msg, percent)
+        print(msg)
+    
+    if not os.path.exists(pdf_path):
+        return [], {}
+    
+    try:
+        doc1 = fitz.open(pdf_path)
+    except Exception as e:
+        print(f"Error opening PDF: {e}")
+        return [], {}
+    
+    doc1_pages = len(doc1)
+    
+    # Get database word index
+    db_index = db_document.get('word_index', {'by_page': {}, 'by_word': {}})
+    db_page_count = db_document.get('page_count', 0)
+    
+    # Build word index for PDF file
+    update_progress(f"\n📄 Input File: {os.path.basename(pdf_path)} ({doc1_pages} pages)", 5)
+    
+    if PARALLEL_OCR and FORCE_OCR and doc1_pages > 1:
+        doc1.close()
+        index1 = build_word_index_parallel(pdf_path, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.45))
+        doc1 = fitz.open(pdf_path)
+    else:
+        index1 = build_word_index(doc1, progress_callback=lambda msg, pct: update_progress(msg, 5 + pct * 0.45))
+    
+    update_progress(f"\n📄 Reference (DB): {db_document.get('document_id', 'Unknown')} ({db_page_count} pages)", 55)
+    update_progress(f"  → Using cached word index from database", 60)
+    
+    # Summary statistics
+    summary = {
+        'mode': mode,
+        'doc1_name': os.path.basename(pdf_path),
+        'doc2_name': f"[DB] {db_document.get('document_id', 'Unknown')}",
+        'doc1_pages': doc1_pages,
+        'doc2_pages': db_page_count,
+        'doc1_total_words': sum(len(words) for words in index1['by_page'].values()),
+        'doc2_total_words': sum(len(words) for words in db_index.get('by_page', {}).values()),
+        'doc1_unique_words': len(index1['by_word']),
+        'doc2_unique_words': len(db_index.get('by_word', {})),
+    }
+    
+    # We need a dummy doc2 for highlighting - create highlight overlays directly on images
+    if mode == 'same':
+        update_progress(f"\n🟢 Mode: SAME - Highlighting matching words...", 65)
+        stats = highlight_same_mode_db(doc1, index1, db_index)
+        summary.update(stats)
+    else:
+        update_progress(f"\n🔴 Mode: DIFF - Highlighting different words...", 65)
+        stats = highlight_diff_mode_db(doc1, index1, db_index)
+        summary.update(stats)
+    
+    # Generate Output Images
+    update_progress("🖼️ Generating output images...", 75)
+    images = []
+    
+    for i in range(doc1_pages):
+        pix = doc1[i].get_pixmap(dpi=150)
+        img1 = Image.open(io.BytesIO(pix.tobytes("png")))
+        
+        # Add Legend on first page
+        if i == 0:
+            img1 = add_legend_to_image(img1, mode, 'doc1')
+        
+        # For DB comparison, we only have one document to show
+        # Could add reference text view later
+        images.append((img1, None))
+        
+        img_progress = 75 + (i + 1) / doc1_pages * 20
+        update_progress(f"  → Generated page {i+1}/{doc1_pages}", img_progress)
+    
+    doc1.close()
+    
+    print_summary(summary)
+    update_progress("✅ Comparison complete!", 100)
+    
+    return images, summary
+
+
+def highlight_same_mode_db(doc1, index1, db_index):
+    """Mode SAME: Highlight matching words (file vs database)"""
+    GREEN = (0, 0.8, 0)
+    
+    matched_in_doc1 = set()
+    matched_words = []
+    
+    db_words = db_index.get('by_word', {})
+    
+    for clean_word, locations1 in index1['by_word'].items():
+        # Exact match
+        if clean_word in db_words:
+            matched_words.append(clean_word)
+            
+            for page_num, word in locations1:
+                word_id = (page_num, word[0], word[1], word[4])
+                if word_id not in matched_in_doc1:
+                    matched_in_doc1.add(word_id)
+                    page = doc1[page_num]
+                    rect = fitz.Rect(word[:4])
+                    page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
+        else:
+            # Fuzzy match
+            matches_in_db = fuzzy_match_word_index(clean_word, db_words, threshold=0.60)
+            
+            if matches_in_db:
+                matched_words.append(clean_word)
+                
+                for page_num, word in locations1:
+                    word_id = (page_num, word[0], word[1], word[4])
+                    if word_id not in matched_in_doc1:
+                        matched_in_doc1.add(word_id)
+                        page = doc1[page_num]
+                        rect = fitz.Rect(word[:4])
+                        page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
+    
+    print(f"  → Matched unique words: {len(matched_words)}")
+    print(f"  → Highlighted {len(matched_in_doc1)} words in input file")
+    
+    return {
+        'matched_doc1': len(matched_in_doc1),
+        'matched_doc2': 0,  # DB document not displayed
+        'matched_unique_words': len(matched_words),
+        'sample_matched': matched_words[:10]
+    }
+
+
+def highlight_diff_mode_db(doc1, index1, db_index):
+    """Mode DIFF: Highlight different words (file vs database)"""
+    RED = (1, 0.3, 0.3)
+    
+    words1 = set(index1['by_word'].keys())
+    db_words = db_index.get('by_word', {})
+    words2 = set(db_words.keys())
+    
+    words_only_in_doc1 = set()
+    
+    for clean_word in words1:
+        if clean_word in words2:
+            continue
+        
+        # Numbers use exact match only
+        if any(c.isdigit() for c in clean_word):
+            words_only_in_doc1.add(clean_word)
+        else:
+            matches = fuzzy_match_word_index(clean_word, db_words, threshold=0.80)
+            if not matches:
+                words_only_in_doc1.add(clean_word)
+    
+    print(f"  → Words only in input file: {len(words_only_in_doc1)}")
+    
+    # Highlight in doc1 (red)
+    count1 = 0
+    for clean_word in words_only_in_doc1:
+        for page_num, word in index1['by_word'][clean_word]:
+            page = doc1[page_num]
+            rect = fitz.Rect(word[:4])
+            page.draw_rect(rect, color=RED, fill=RED, fill_opacity=0.4, width=0)
+            count1 += 1
+    
+    print(f"  → Highlighted {count1} words in input file (red)")
+    
+    return {
+        'diff_doc1': len(words_only_in_doc1),
+        'diff_doc2': 0,
+        'highlighted_doc1': count1,
+        'highlighted_doc2': 0,
+        'sample_doc1': list(words_only_in_doc1)[:10],
+        'sample_doc2': []
+    }
+
+
+def fuzzy_match_word_index(word, word_index_by_word, threshold=0.70):
+    """Fuzzy match against a by_word index (dict of word -> locations)"""
+    clean = clean_text(word)
+    normalized = normalize_for_compare(word)
+    normalized_no_tone = normalize_thai_tones(normalized)
+    
+    if not clean or len(clean) < 2:
+        return []
+    
+    matches = []
+    
+    for indexed_word in word_index_by_word.keys():
+        indexed_normalized = normalize_for_compare(indexed_word)
+        indexed_no_tone = normalize_thai_tones(indexed_normalized)
+        
+        # Normalized exact match
+        if normalized == indexed_normalized:
+            matches.append(indexed_word)
+            continue
+        
+        # Match after removing tones
+        if normalized_no_tone == indexed_no_tone:
+            matches.append(indexed_word)
+            continue
+        
+        # Substring match
+        if len(normalized) >= 3 and len(indexed_normalized) >= 3:
+            if normalized in indexed_normalized or indexed_normalized in normalized:
+                matches.append(indexed_word)
+                continue
+        
+        # Fuzzy ratio
+        if abs(len(indexed_word) - len(clean)) > max(len(clean) * 0.5, 3):
+            continue
+            
+        ratio = difflib.SequenceMatcher(None, clean, indexed_word).ratio()
+        if ratio >= threshold:
+            matches.append(indexed_word)
+    
+    return matches
 
 
 def add_legend_to_image(img, mode, doc_side):
@@ -502,6 +878,12 @@ def highlight_same_mode(doc1, doc2, index1, index2):
     sample_words2 = list(index2['by_word'].keys())[:10]
     print(f"  → Sample words in Doc1: {sample_words1}")
     print(f"  → Sample words in Doc2: {sample_words2}")
+    
+    # Debug: หาคำที่มี "ประกาย" ในทั้ง 2 เอกสาร
+    prakay_words1 = [w for w in index1['by_word'].keys() if 'ประกาย' in w]
+    prakay_words2 = [w for w in index2['by_word'].keys() if 'ประกาย' in w]
+    print(f"  → Words containing 'ประกาย' in Doc1: {prakay_words1}")
+    print(f"  → Words containing 'ประกาย' in Doc2: {prakay_words2}")
     
     for clean_word, locations1 in index1['by_word'].items():
         # ลองหา exact match ก่อน
