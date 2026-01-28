@@ -183,6 +183,34 @@ def numbers_are_equal(num1_text, num2_text):
         return v1 == v2
 
 
+def is_thai_number_word(text):
+    """
+    ตรวจสอบว่าข้อความมีจำนวนเงินที่เป็นตัวหนังสือภาษาไทยหรือไม่
+    เช่น "หนึ่งหมื่นบาท", "สองแสนห้าหมื่น", "สามล้านบาทถ้วน"
+    """
+    # ตัวเลขภาษาไทย
+    thai_digits = ['หนึ่ง', 'สอง', 'สาม', 'สี่', 'ห้า', 'หก', 'เจ็ด', 'แปด', 'เก้า', 'สิบ', 
+                   'เอ็ด', 'ยี่', 'ศูนย์']
+    # หน่วยนับภาษาไทย
+    thai_units = ['ร้อย', 'พัน', 'หมื่น', 'แสน', 'ล้าน', 'สิบ']
+    # คำที่เกี่ยวกับเงิน
+    money_words = ['บาท', 'สตางค์', 'ถ้วน']
+    
+    text_lower = text.lower()
+    
+    # ตรวจสอบว่ามีตัวเลขภาษาไทยและหน่วยนับรวมกัน
+    has_digit = any(digit in text for digit in thai_digits)
+    has_unit = any(unit in text for unit in thai_units)
+    has_money = any(word in text for word in money_words)
+    
+    # ถ้ามีตัวเลข+หน่วย หรือ มีคำเกี่ยวกับเงิน+ตัวเลข → เป็นจำนวนเงินตัวหนังสือ
+    if (has_digit and has_unit) or (has_money and has_digit):
+        return True
+    
+    # ตรวจสอบ pattern ที่เป็นจำนวนเงิน เช่น "หนึ่งหมื่น", "สองแสน"
+    return False
+
+
 def is_significant(text):
     """ตรวจสอบว่าคำนี้สำคัญพอที่จะไฮไลท์หรือไม่"""
     clean = clean_text(text)
@@ -195,6 +223,9 @@ def is_significant(text):
         return False
     # ตัวเลขสำคัญเสมอ
     if any(char.isdigit() for char in clean): 
+        return True
+    # จำนวนเงินที่เป็นตัวหนังสือภาษาไทยสำคัญเสมอ
+    if is_thai_number_word(text):
         return True
     # คำยาว 2 ตัวขึ้นไปถือว่าสำคัญ
     if len(clean) >= 2: 
@@ -735,8 +766,13 @@ def highlight_diff_mode_db(doc1, index1, db_index):
         if clean_word in words2:
             continue
         
-        # Numbers use exact match only
-        if any(c.isdigit() for c in clean_word):
+        # ดึง original text จาก index เพื่อตรวจสอบ
+        original_text = ""
+        if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
+            original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
+        
+        # Numbers and Thai number words use exact match only
+        if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
             words_only_in_doc1.add(clean_word)
         else:
             matches = fuzzy_match_word_index(clean_word, db_words, threshold=0.80)
@@ -1018,8 +1054,13 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in words2:
             continue
         
-        # ถ้าเป็นตัวเลข → ใช้ exact match เท่านั้น (ไม่ fuzzy)
-        if any(c.isdigit() for c in clean_word):
+        # ดึง original text จาก index เพื่อตรวจสอบ
+        original_text = ""
+        if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
+            original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
+        
+        # ถ้าเป็นตัวเลข หรือ จำนวนเงินตัวหนังสือ → ใช้ exact match เท่านั้น (ไม่ fuzzy)
+        if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
             words_only_in_doc1.add(clean_word)
         else:
             # ถ้าไม่ใช่ตัวเลข → ลอง fuzzy match
@@ -1032,7 +1073,12 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in words1:
             continue
         
-        if any(c.isdigit() for c in clean_word):
+        # ดึง original text จาก index เพื่อตรวจสอบ
+        original_text = ""
+        if clean_word in index2['by_word'] and index2['by_word'][clean_word]:
+            original_text = index2['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
+        
+        if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
             words_only_in_doc2.add(clean_word)
         else:
             matches = fuzzy_match_word(clean_word, index1, threshold=0.80)
