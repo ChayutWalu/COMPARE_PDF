@@ -212,24 +212,70 @@ def is_thai_number_word(text):
 
 
 def is_significant(text):
-    """ตรวจสอบว่าคำนี้สำคัญพอที่จะไฮไลท์หรือไม่"""
+    """
+    ตรวจสอบว่าคำนี้สำคัญพอที่จะไฮไลท์หรือไม่
+    ไฮไลท์: ตัวเลข, จำนวนเงิน, วันที่, ประเภทกรมธรรม์, ชื่อ, ค่าข้อมูลสำคัญ
+    """
     clean = clean_text(text)
     if not clean:
         return False
-    # คำสั้นมาก (1 ตัวอักษร) ไม่สำคัญ ยกเว้นตัวเลข
-    if len(clean) == 1 and not clean.isdigit(): 
-        return False
-    if clean in STOPWORDS: 
-        return False
-    # ตัวเลขสำคัญเสมอ
+    
+    # ตัวเลขสำคัญเสมอ (รวมถึงวันที่, เลขกรมธรรม์, จำนวนเงิน)
     if any(char.isdigit() for char in clean): 
         return True
+    
     # จำนวนเงินที่เป็นตัวหนังสือภาษาไทยสำคัญเสมอ
     if is_thai_number_word(text):
         return True
-    # คำยาว 2 ตัวขึ้นไปถือว่าสำคัญ
-    if len(clean) >= 2: 
+    
+    # ประเภทกรมธรรม์และคำสำคัญที่ต้องไฮไลท์
+    # - ประเภทประกัน (รถยนต์, อัคคีภัย, สุขภาพ ฯลฯ)
+    # - ชื่อคน/บริษัท  
+    # - ข้อมูลสำคัญอื่นๆ
+    if is_policy_type_or_important(text):
         return True
+    
+    # ข้อความยาวกว่า 2 ตัวอักษรที่ไม่ใช่ stopword ถือว่าสำคัญ
+    # (อาจเป็นชื่อคน, ยี่ห้อ, หรือข้อมูลสำคัญอื่นๆ)
+    if len(clean) > 2 and clean not in STOPWORDS:
+        return True
+    
+    return False
+
+
+def is_policy_type_or_important(text):
+    """
+    ตรวจสอบว่าข้อความเป็นประเภทกรมธรรม์หรือคำสำคัญที่ต้องไฮไลท์
+    """
+    # ประเภทประกันภัย/กรมธรรม์
+    policy_types = [
+        # ประเภทประกันหลัก
+        'รถยนต์', 'รถจักรยานยนต์', 'มอเตอร์ไซค์', 'รถบรรทุก', 
+        'อัคคีภัย', 'ไฟไหม้', 
+        'สุขภาพ', 'อุบัติเหตุ', 'ชีวิต', 'ประกันชีวิต',
+        'ทรัพย์สิน', 'ภัยธรรมชาติ', 'น้ำท่วม', 'แผ่นดินไหว',
+        'ขนส่ง', 'ทางทะเล', 'เดินทาง', 'ท่องเที่ยว',
+        'บ้าน', 'ที่อยู่อาศัย', 'คอนโด', 'อาคาร',
+        'เบ็ดเตล็ด', 'ความรับผิด', 'ค้ำประกัน',
+        'กลุ่ม', 'สวัสดิการ', 'พนักงาน',
+        # ประเภทความคุ้มครอง
+        'ภาคบังคับ', 'ภาคสมัครใจ', 'ชั้น1', 'ชั้น2', 'ชั้น3',
+        'พรบ', 'cmi', 'vmi',
+        # ภาษาอังกฤษ  
+        'motor', 'fire', 'health', 'life', 'property',
+        'marine', 'travel', 'home', 'building',
+        'liability', 'accident', 'personal', 'commercial',
+        'comprehensive', 'third party'
+    ]
+    
+    text_lower = text.lower()
+    clean_lower = clean_text(text).lower()
+    
+    # ตรวจสอบว่ามีประเภทประกันอยู่หรือไม่
+    for policy_type in policy_types:
+        if policy_type in text_lower or policy_type in clean_lower:
+            return True
+    
     return False
 
 
