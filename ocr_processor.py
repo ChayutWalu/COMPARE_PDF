@@ -99,9 +99,36 @@ def normalize_thai_tones(text):
     return text
 
 
+def normalize_leading_zeros(text):
+    """
+    Normalize leading zeros สำหรับวันที่ไทย
+    "9กันยายน2568" → "09กันยายน2568"
+    "1มกราคม2567" → "01มกราคม2567"
+    """
+    # Pattern: ตัวเลข 1 หลักที่อยู่ต้น string ตามด้วยตัวอักษรไทย (เดือน)
+    normalized = re.sub(r'^(\d)([\u0E00-\u0E7F])', r'0\1\2', text)
+    return normalized
+
+
 def normalize_for_compare(text):
-    """Normalize text สำหรับเปรียบเทียบ - ลบ space ทั้งหมด (ไม่ลบวรรณยุกต์)"""
-    return re.sub(r'\s+', '', clean_text(text))
+    """Normalize text สำหรับเปรียบเทียบ - ลบ space, separators และ normalize leading zeros"""
+    # ลบ space, /, -, . สำหรับ format ต่างๆ เช่น วันที่
+    normalized = re.sub(r'[\s/\-\.]+', '', clean_text(text))
+    
+    # Normalize leading zeros สำหรับวันที่ไทย
+    normalized = normalize_leading_zeros(normalized)
+    
+    return normalized
+
+
+def normalize_date_text(text):
+    """
+    Normalize วันที่ format ต่างๆ ให้เหมือนกัน
+    เช่น "09/กันยายน/2568" → "09กันยายน2568"
+         "09 กันยายน 2568" → "09กันยายน2568"
+    """
+    # ลบ separators ทั้งหมด (/, -, space)
+    return re.sub(r'[\s/\-]+', '', text)
 
 
 def normalize_number(text):
@@ -211,72 +238,164 @@ def is_thai_number_word(text):
     return False
 
 
+# =====================================================
+# [NEW] Date/Time Extraction and Comparison
+# =====================================================
+THAI_MONTHS = {
+    'มกราคม': '01', 'กุมภาพันธ์': '02', 'มีนาคม': '03', 'เมษายน': '04',
+    'พฤษภาคม': '05', 'มิถุนายน': '06', 'กรกฎาคม': '07', 'สิงหาคม': '08',
+    'กันยายน': '09', 'ตุลาคม': '10', 'พฤศจิกายน': '11', 'ธันวาคม': '12',
+    # Short forms
+    'ม.ค.': '01', 'ก.พ.': '02', 'มี.ค.': '03', 'เม.ย.': '04',
+    'พ.ค.': '05', 'มิ.ย.': '06', 'ก.ค.': '07', 'ส.ค.': '08',
+    'ก.ย.': '09', 'ต.ค.': '10', 'พ.ย.': '11', 'ธ.ค.': '12'
+}
+
+# คำ keywords ที่บอกว่าเป็นบรรทัดเกี่ยวกับวันที่
+DATE_KEYWORDS = [
+    'ระยะเวลาประกันภัย', 'วันที่', 'วันทำสัญญา', 'สิ้นสุดวันที่', 'เริ่มต้นวันที่',
+    'ตั้งแต่วันที่', 'ถึงวันที่', 'วันทำสัญญาประกันภัย', 'วันที่ทำสัญญา',
+    'period of insurance', 'from', 'agreement made on', 'policy issued',
+    'เริ่มต้น', 'สิ้นสุด', 'เวลา'
+]
+
+
+def extract_thai_dates(text):
+    """
+    แยกวันที่ภาษาไทยจาก text
+    รองรับ: "09 กันยายน 2568", "09กันยายน2568", "09/กันยายน/2568"
+    Returns: list of normalized date strings (DD-MM-YYYY)
+    """
+    dates = []
+    
+    for month_th, month_num in THAI_MONTHS.items():
+        # Pattern: วัน เดือน ปี (with or without spaces/separators)
+        pattern = rf'(\d{{1,2}})\s*[/\-]?\s*{re.escape(month_th)}\s*[/\-]?\s*(\d{{4}})'
+        matches = re.findall(pattern, text)
+        for day, year in matches:
+            dates.append(f"{int(day):02d}-{month_num}-{year}")
+    
+    # Pattern: DD/MM/YYYY or DD-MM-YYYY
+    pattern = r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})'
+    matches = re.findall(pattern, text)
+    for day, month, year in matches:
+        dates.append(f"{int(day):02d}-{int(month):02d}-{year}")
+    
+    return dates
+
+
+def extract_times(text):
+    """
+    แยกเวลาจาก text
+    รองรับ: "16.30 น.", "16:30", "16.30"
+    Returns: list of normalized time strings (HH:MM)
+    """
+    times = []
+    
+    # Pattern: HH.MM หรือ HH:MM (with optional น. or u.)
+    pattern = r'(\d{1,2})[.:](\d{2})\s*(?:น\.?|u\.?)?'
+    matches = re.findall(pattern, text)
+    for hour, minute in matches:
+        h = int(hour)
+        if 0 <= h <= 24:  # Valid hour
+            times.append(f"{h:02d}:{minute}")
+    
+    return times
+
+
+def is_date_related_word(text):
+    """
+    ตรวจสอบว่าคำนี้เป็นส่วนหนึ่งของวันที่หรือไม่
+    รองรับทั้งคำแยก เช่น "กันยายน", "2568", "09"
+    และ full date string เช่น "09/กันยายน/2568", "09กันยายน2568"
+    """
+    # เป็นชื่อเดือนไทย
+    if text in THAI_MONTHS:
+        return True
+    
+    # เป็นปี พ.ศ. (2500-2600)
+    if re.match(r'^25\d{2}$', text):
+        return True
+    
+    # เป็นวันที่ (01-31)
+    if re.match(r'^0?[1-9]$|^[12]\d$|^3[01]$', text):
+        return True
+    
+    # [NEW] ตรวจสอบว่ามีชื่อเดือนไทยอยู่ใน text หรือไม่ (full date string)
+    for month in THAI_MONTHS.keys():
+        if month in text:
+            # ถ้ามีเดือน + ตัวเลข (ปีหรือวัน) → เป็น date string
+            if re.search(r'\d', text):
+                return True
+    
+    # [NEW] Pattern: DD/MM/YYYY หรือ DD-MM-YYYY
+    if re.match(r'^\d{1,2}[/\-]\d{1,2}[/\-]\d{4}$', text):
+        return True
+    
+    return False
+
+
+def is_date_related_context(text):
+    """
+    ตรวจสอบว่า text มี context เกี่ยวกับวันที่หรือไม่
+    ใช้สำหรับตรวจสอบทั้งบรรทัด
+    """
+    text_lower = text.lower()
+    return any(kw in text_lower or kw in text for kw in DATE_KEYWORDS)
+
+
+def dates_match(text1, text2):
+    """
+    เปรียบเทียบว่าวันที่ใน 2 texts เหมือนกันหรือไม่
+    Returns: True ถ้าวันที่เหมือนกัน, False ถ้าต่างกัน, None ถ้าไม่มีวันที่
+    """
+    dates1 = extract_thai_dates(text1)
+    dates2 = extract_thai_dates(text2)
+    
+    if not dates1 and not dates2:
+        return None  # ไม่มีวันที่ทั้งคู่
+    
+    if dates1 and dates2:
+        return sorted(dates1) == sorted(dates2)
+    
+    return False  # มีฝั่งเดียว
+
+
+def times_match(text1, text2):
+    """
+    เปรียบเทียบว่าเวลาใน 2 texts เหมือนกันหรือไม่
+    """
+    times1 = extract_times(text1)
+    times2 = extract_times(text2)
+    
+    if not times1 and not times2:
+        return None  # ไม่มีเวลาทั้งคู่
+    
+    if times1 and times2:
+        return sorted(times1) == sorted(times2)
+    
+    return False  # มีฝั่งเดียว
+
+
 def is_significant(text):
     """
-    ตรวจสอบว่าคำนี้สำคัญพอที่จะไฮไลท์หรือไม่
-    ไฮไลท์: ตัวเลข, จำนวนเงิน, วันที่, ประเภทกรมธรรม์, ชื่อ, ค่าข้อมูลสำคัญ
+    ตรวจสอบว่าคำนี้สำคัญพอที่จะ index และเปรียบเทียบหรือไม่
+    index ทุกคำที่มีความยาว >= 2 ตัวอักษร
     """
     clean = clean_text(text)
     if not clean:
         return False
     
-    # ตัวเลขสำคัญเสมอ (รวมถึงวันที่, เลขกรมธรรม์, จำนวนเงิน)
-    if any(char.isdigit() for char in clean): 
-        return True
+    # คำที่สั้นเกินไป (1 ตัวอักษร) ไม่ index
+    if len(clean) < 2:
+        return False
     
-    # จำนวนเงินที่เป็นตัวหนังสือภาษาไทยสำคัญเสมอ
-    if is_thai_number_word(text):
-        return True
+    # ข้ามคำที่อยู่ใน stopwords
+    if clean in STOPWORDS:
+        return False
     
-    # ประเภทกรมธรรม์และคำสำคัญที่ต้องไฮไลท์
-    # - ประเภทประกัน (รถยนต์, อัคคีภัย, สุขภาพ ฯลฯ)
-    # - ชื่อคน/บริษัท  
-    # - ข้อมูลสำคัญอื่นๆ
-    if is_policy_type_or_important(text):
-        return True
-    
-    # ข้อความยาวกว่า 2 ตัวอักษรที่ไม่ใช่ stopword ถือว่าสำคัญ
-    # (อาจเป็นชื่อคน, ยี่ห้อ, หรือข้อมูลสำคัญอื่นๆ)
-    if len(clean) > 2 and clean not in STOPWORDS:
-        return True
-    
-    return False
-
-
-def is_policy_type_or_important(text):
-    """
-    ตรวจสอบว่าข้อความเป็นประเภทกรมธรรม์หรือคำสำคัญที่ต้องไฮไลท์
-    """
-    # ประเภทประกันภัย/กรมธรรม์
-    policy_types = [
-        # ประเภทประกันหลัก
-        'รถยนต์', 'รถจักรยานยนต์', 'มอเตอร์ไซค์', 'รถบรรทุก', 
-        'อัคคีภัย', 'ไฟไหม้', 
-        'สุขภาพ', 'อุบัติเหตุ', 'ชีวิต', 'ประกันชีวิต',
-        'ทรัพย์สิน', 'ภัยธรรมชาติ', 'น้ำท่วม', 'แผ่นดินไหว',
-        'ขนส่ง', 'ทางทะเล', 'เดินทาง', 'ท่องเที่ยว',
-        'บ้าน', 'ที่อยู่อาศัย', 'คอนโด', 'อาคาร',
-        'เบ็ดเตล็ด', 'ความรับผิด', 'ค้ำประกัน',
-        'กลุ่ม', 'สวัสดิการ', 'พนักงาน',
-        # ประเภทความคุ้มครอง
-        'ภาคบังคับ', 'ภาคสมัครใจ', 'ชั้น1', 'ชั้น2', 'ชั้น3',
-        'พรบ', 'cmi', 'vmi',
-        # ภาษาอังกฤษ  
-        'motor', 'fire', 'health', 'life', 'property',
-        'marine', 'travel', 'home', 'building',
-        'liability', 'accident', 'personal', 'commercial',
-        'comprehensive', 'third party'
-    ]
-    
-    text_lower = text.lower()
-    clean_lower = clean_text(text).lower()
-    
-    # ตรวจสอบว่ามีประเภทประกันอยู่หรือไม่
-    for policy_type in policy_types:
-        if policy_type in text_lower or policy_type in clean_lower:
-            return True
-    
-    return False
+    # index ทุกคำที่เหลือ (รวมถึงประเภทกรมธรรม์, ชื่อ, ที่อยู่, วันที่ ฯลฯ)
+    return True
 
 
 def ocr_single_image(img_np):
@@ -806,6 +925,29 @@ def highlight_diff_mode_db(doc1, index1, db_index):
     db_words = db_index.get('by_word', {})
     words2 = set(db_words.keys())
     
+    # [NEW] สร้าง full text สำหรับ date comparison
+    def get_full_text(index):
+        texts = []
+        for page_num, words in index.get('by_page', {}).items():
+            page_text = ' '.join(w[4] for w in words)
+            texts.append(page_text)
+        return ' '.join(texts)
+    
+    full_text1 = get_full_text(index1)
+    full_text2 = get_full_text(db_index)
+    
+    # [NEW] Extract all dates from both documents
+    all_dates1 = extract_thai_dates(full_text1)
+    all_dates2 = extract_thai_dates(full_text2)
+    all_times1 = extract_times(full_text1)
+    all_times2 = extract_times(full_text2)
+    
+    # [NEW] Check if dates match globally
+    dates_are_same = sorted(all_dates1) == sorted(all_dates2) if all_dates1 and all_dates2 else True
+    times_are_same = sorted(all_times1) == sorted(all_times2) if all_times1 and all_times2 else True
+    
+    print(f"  → [Date Check] Dates match: {dates_are_same}, Times match: {times_are_same}")
+    
     words_only_in_doc1 = set()
     
     for clean_word in words1:
@@ -817,8 +959,24 @@ def highlight_diff_mode_db(doc1, index1, db_index):
         if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
             original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
+        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        if dates_are_same and is_date_related_word(original_text):
+            continue
+        
+        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        if times_are_same:
+            word_times = extract_times(original_text)
+            if word_times:
+                continue
+        
         # Numbers and Thai number words use exact match only
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
+            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
+            if dates_are_same:
+                if re.match(r'^25\d{2}$', clean_word):
+                    continue
+                if re.match(r'^0?[1-9]$|^[12]\d$|^3[01]$', clean_word):
+                    continue
             words_only_in_doc1.add(clean_word)
         else:
             matches = fuzzy_match_word_index(clean_word, db_words, threshold=0.80)
@@ -1004,12 +1162,16 @@ def print_summary(summary):
 
 
 def highlight_same_mode(doc1, doc2, index1, index2):
-    """โหมด SAME: ไฮไลท์คำที่เหมือนกัน"""
+    """โหมด SAME: ไฮไลท์คำที่เหมือนกัน (รวม normalized match สำหรับวันที่/ตัวเลข)"""
     GREEN = (0, 0.8, 0)
     
     matched_in_doc1 = set()
     matched_in_doc2 = set()
     matched_words = []
+    
+    # สร้าง normalized lookup
+    words2 = set(index2['by_word'].keys())
+    normalized2 = {normalize_for_compare(w): w for w in words2}
     
     # Debug: แสดงตัวอย่างคำใน index
     sample_words1 = list(index1['by_word'].keys())[:10]
@@ -1024,8 +1186,18 @@ def highlight_same_mode(doc1, doc2, index1, index2):
     print(f"  → Words containing 'ประกาย' in Doc2: {prakay_words2}")
     
     for clean_word, locations1 in index1['by_word'].items():
-        # ลองหา exact match ก่อน
+        matched_doc2_word = None
+        
+        # 1. ลองหา exact match ก่อน
         if clean_word in index2['by_word']:
+            matched_doc2_word = clean_word
+        else:
+            # 2. [NEW] ลอง normalized match (สำหรับวันที่/ตัวเลขที่ต่าง format)
+            normalized_clean = normalize_for_compare(clean_word)
+            if normalized_clean in normalized2:
+                matched_doc2_word = normalized2[normalized_clean]
+        
+        if matched_doc2_word:
             matched_words.append(clean_word)
             
             # ไฮไลท์ใน doc1
@@ -1037,8 +1209,8 @@ def highlight_same_mode(doc1, doc2, index1, index2):
                     rect = fitz.Rect(word[:4])
                     page.draw_rect(rect, color=GREEN, fill=GREEN, fill_opacity=0.35, width=0)
             
-            # ไฮไลท์ใน doc2
-            for page_num, word in index2['by_word'][clean_word]:
+            # ไฮไลท์ใน doc2 (ใช้ matched_doc2_word)
+            for page_num, word in index2['by_word'][matched_doc2_word]:
                 word_id = (page_num, word[0], word[1], word[4])
                 if word_id not in matched_in_doc2:
                     matched_in_doc2.add(word_id)
@@ -1083,13 +1255,48 @@ def highlight_same_mode(doc1, doc2, index1, index2):
 
 
 def highlight_diff_mode(doc1, doc2, index1, index2):
-    """โหมด DIFF: ไฮไลท์คำที่แตกต่างกัน - ใช้ Exact Match สำหรับตัวเลข"""
+    """โหมด DIFF: ไฮไลท์คำที่แตกต่างกัน - ใช้ Normalized Match สำหรับตัวเลข/วันที่"""
     RED = (1, 0.3, 0.3)       # มีใน Doc1 แต่ไม่มีใน Doc2
     GREEN = (0.3, 0.8, 0.3)   # มีใน Doc2 แต่ไม่มีใน Doc1
     
     # สร้าง set ของคำ
     words1 = set(index1['by_word'].keys())
     words2 = set(index2['by_word'].keys())
+    
+    # สร้าง normalized lookup สำหรับเปรียบเทียบวันที่/ตัวเลขที่ต่าง format
+    normalized2 = {normalize_for_compare(w): w for w in words2}
+    normalized1 = {normalize_for_compare(w): w for w in words1}
+    
+    # [NEW] สร้าง full text จากทุก page สำหรับ date comparison
+    def get_full_text(index):
+        texts = []
+        for page_num, words in index.get('by_page', {}).items():
+            page_text = ' '.join(w[4] for w in words)
+            texts.append(page_text)
+        return ' '.join(texts)
+    
+    full_text1 = get_full_text(index1)
+    full_text2 = get_full_text(index2)
+    
+    # [NEW] Extract all dates from both documents
+    all_dates1 = extract_thai_dates(full_text1)
+    all_dates2 = extract_thai_dates(full_text2)
+    all_times1 = extract_times(full_text1)
+    all_times2 = extract_times(full_text2)
+    
+    # [NEW] Check if dates match globally
+    dates_are_same = sorted(all_dates1) == sorted(all_dates2) if all_dates1 and all_dates2 else True
+    times_are_same = sorted(all_times1) == sorted(all_times2) if all_times1 and all_times2 else True
+    
+    print(f"  → [Date Check] Doc1 dates: {all_dates1[:10]}")
+    print(f"  → [Date Check] Doc2 dates: {all_dates2[:10]}")
+    print(f"  → [Date Check] Dates match: {dates_are_same}, Times match: {times_are_same}")
+    
+    # [DEBUG] แสดงตัวอย่าง normalized words
+    sample_normalized1 = list(normalized1.items())[:5]
+    sample_normalized2 = list(normalized2.items())[:5]
+    print(f"  → [Normalize Check] Sample Doc1: {sample_normalized1}")
+    print(f"  → [Normalize Check] Sample Doc2: {sample_normalized2}")
     
     words_only_in_doc1 = set()
     words_only_in_doc2 = set()
@@ -1100,14 +1307,50 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in words2:
             continue
         
+        # ลอง normalized match (สำหรับวันที่/ตัวเลขที่ต่าง format)
+        normalized_clean = normalize_for_compare(clean_word)
+        if normalized_clean in normalized2:
+            continue  # มี match ใน doc2 หลัง normalize → ไม่ใช่ความต่าง
+        
         # ดึง original text จาก index เพื่อตรวจสอบ
         original_text = ""
         if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
             original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
-        # ถ้าเป็นตัวเลข หรือ จำนวนเงินตัวหนังสือ → ใช้ exact match เท่านั้น (ไม่ fuzzy)
+        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        if dates_are_same and is_date_related_word(original_text):
+            continue
+        
+        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        if times_are_same:
+            word_times = extract_times(original_text)
+            if word_times:
+                continue
+        
+        # ถ้าเป็นตัวเลข หรือ จำนวนเงินตัวหนังสือ → ลองเทียบเป็นตัวเลข
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
-            words_only_in_doc1.add(clean_word)
+            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
+            if dates_are_same:
+                # ถ้าตัวเลขนี้เป็นปี (2500-2600) หรือ วัน (1-31) → ข้าม
+                if re.match(r'^25\d{2}$', clean_word):
+                    continue
+                if re.match(r'^0?[1-9]$|^[12]\d$|^3[01]$', clean_word):
+                    # เช็คว่าเลขนี้อยู่ในวันที่หรือไม่
+                    if any(clean_word in d for d in all_dates1):
+                        continue
+            
+            # ลองเปรียบเทียบเป็น numeric value
+            val1 = extract_number_value(clean_word)
+            if val1:
+                found_match = False
+                for w2 in words2:
+                    if numbers_are_equal(clean_word, w2):
+                        found_match = True
+                        break
+                if not found_match:
+                    words_only_in_doc1.add(clean_word)
+            else:
+                words_only_in_doc1.add(clean_word)
         else:
             # ถ้าไม่ใช่ตัวเลข → ลอง fuzzy match
             matches = fuzzy_match_word(clean_word, index2, threshold=0.80)
@@ -1119,13 +1362,46 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in words1:
             continue
         
+        # ลอง normalized match
+        normalized_clean = normalize_for_compare(clean_word)
+        if normalized_clean in normalized1:
+            continue
+        
         # ดึง original text จาก index เพื่อตรวจสอบ
         original_text = ""
         if clean_word in index2['by_word'] and index2['by_word'][clean_word]:
             original_text = index2['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
+        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        if dates_are_same and is_date_related_word(original_text):
+            continue
+        
+        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        if times_are_same:
+            word_times = extract_times(original_text)
+            if word_times:
+                continue
+        
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
-            words_only_in_doc2.add(clean_word)
+            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
+            if dates_are_same:
+                if re.match(r'^25\d{2}$', clean_word):
+                    continue
+                if re.match(r'^0?[1-9]$|^[12]\d$|^3[01]$', clean_word):
+                    if any(clean_word in d for d in all_dates2):
+                        continue
+            
+            val2 = extract_number_value(clean_word)
+            if val2:
+                found_match = False
+                for w1 in words1:
+                    if numbers_are_equal(clean_word, w1):
+                        found_match = True
+                        break
+                if not found_match:
+                    words_only_in_doc2.add(clean_word)
+            else:
+                words_only_in_doc2.add(clean_word)
         else:
             matches = fuzzy_match_word(clean_word, index1, threshold=0.80)
             if not matches:
