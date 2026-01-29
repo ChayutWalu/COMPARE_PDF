@@ -10,6 +10,25 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import platform
+import logging
+from decimal import Decimal, InvalidOperation
+
+# =====================================================
+# Logging Configuration
+# =====================================================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# =====================================================
+# Constants - Magic Numbers Centralized
+# =====================================================
+OCR_CONFIDENCE_THRESHOLD = 0.2      # ค่าความมั่นใจขั้นต่ำของ OCR
+OCR_DPI = 300                        # DPI สำหรับ OCR processing
+OUTPUT_DPI = 150                     # DPI สำหรับ output images
+MIN_WORD_LENGTH = 2                  # ความยาวขั้นต่ำของคำที่จะ index
+FUZZY_THRESHOLD_DEFAULT = 0.70       # threshold สำหรับ fuzzy matching
+FUZZY_THRESHOLD_STRICT = 0.80        # threshold สำหรับ strict matching
+FUZZY_THRESHOLD_LOOSE = 0.60         # threshold สำหรับ loose matching
 
 # =====================================================
 # Platform Detection - รองรับ macOS, Windows, Linux
@@ -79,34 +98,53 @@ ALL_SKIP_WORDS = STOPWORDS | FORM_LABELS
 # หมายเหตุ: ลบ "คุณ" ออกจาก STOPWORDS เพราะมักติดกับชื่อคน
 
 # =====================================================
-# EasyOCR Initialization - Auto-detect GPU/CPU by platform
+# EasyOCR Initialization - Lazy Loading for faster imports
 # =====================================================
-print("Initializing EasyOCR...")
+_reader = None
+_reader_lock = threading.Lock()
 
-if IS_MAC:
-    # macOS: ใช้ CPU เสมอ (MPS ยังไม่ stable กับ EasyOCR)
-    print("🍎 macOS detected - Using CPU mode")
-    reader = easyocr.Reader(['th', 'en'], gpu=False)
-    print("✅ EasyOCR initialized with CPU")
-else:
-    # Windows/Linux: ลองใช้ CUDA GPU ก่อน
-    print("Checking for CUDA GPU...")
-    try:
-        reader = easyocr.Reader(['th', 'en'], gpu=True)
-        print("✅ EasyOCR initialized with GPU (CUDA)")
-    except Exception as e:
-        print(f"⚠️ GPU not available: {e}")
-        reader = easyocr.Reader(['th', 'en'], gpu=False)
-        print("✅ EasyOCR initialized with CPU (fallback)")
+
+def get_ocr_reader():
+    """Lazy initialization of EasyOCR reader - thread-safe"""
+    global _reader
+    if _reader is None:
+        with _reader_lock:
+            if _reader is None:  # Double-check locking
+                logger.info("Initializing EasyOCR (lazy load)...")
+                if IS_MAC:
+                    logger.info("🍎 macOS detected - Using CPU mode")
+                    _reader = easyocr.Reader(['th', 'en'], gpu=False)
+                    logger.info("✅ EasyOCR initialized with CPU")
+                else:
+                    logger.info("Checking for CUDA GPU...")
+                    try:
+                        _reader = easyocr.Reader(['th', 'en'], gpu=True)
+                        logger.info("✅ EasyOCR initialized with GPU (CUDA)")
+                    except Exception as e:
+                        logger.warning(f"⚠️ GPU not available: {e}")
+                        _reader = easyocr.Reader(['th', 'en'], gpu=False)
+                        logger.info("✅ EasyOCR initialized with CPU (fallback)")
+    return _reader
+
+
+# Backward compatibility - สำหรับ code ที่ยังใช้ reader ตรงๆ
+class LazyReader:
+    """Proxy class for lazy loading EasyOCR reader"""
+    def __getattr__(self, name):
+        return getattr(get_ocr_reader(), name)
+
+reader = LazyReader()
 
 
 def extract_text_from_pdf(pdf_path):
     """แกะข้อความสำหรับ LLM"""
     if not os.path.exists(pdf_path): 
+        logger.warning(f"PDF file not found: {pdf_path}")
         return ""
     try:
         doc = fitz.open(pdf_path)
-    except: 
+    except Exception as e:
+        logger.error(f"Failed to open PDF {pdf_path}: {e}")
         return ""
 
     extracted_text = ""
@@ -117,12 +155,15 @@ def extract_text_from_pdf(pdf_path):
             continue
             
         try:
-            pix = page.get_pixmap(dpi=300)
+            pix = page.get_pixmap(dpi=OCR_DPI)
             img_np = np.array(Image.open(io.BytesIO(pix.tobytes("png"))))
-            result_list = reader.readtext(img_np, detail=0, paragraph=True)
+            ocr_reader = get_ocr_reader()
+            result_list = ocr_reader.readtext(img_np, detail=0, paragraph=True)
             extracted_text += f"--- Page {i+1} (EasyOCR) ---\n{chr(10).join(result_list)}\n"
-        except: 
-            pass
+        except Exception as e:
+            logger.warning(f"OCR failed for page {i+1} of {pdf_path}: {e}")
+    
+    doc.close()
     return extracted_text
 
 
@@ -145,12 +186,20 @@ def normalize_thai_tones(text):
 
 def normalize_leading_zeros(text):
     """
-    Normalize leading zeros สำหรับวันที่ไทย
+    Normalize leading zeros สำหรับวันที่ไทย - ทำงานทั้ง string
     "9กันยายน2568" → "09กันยายน2568"
     "1มกราคม2567" → "01มกราคม2567"
+    "กันยายน9" → "กันยายน09" (กรณีวันอยู่หลังเดือน)
     """
-    # Pattern: ตัวเลข 1 หลักที่อยู่ต้น string ตามด้วยตัวอักษรไทย (เดือน)
+    # Pattern 1: ตัวเลข 1 หลักที่อยู่ต้น string ตามด้วยตัวอักษรไทย (เดือน)
     normalized = re.sub(r'^(\d)([\u0E00-\u0E7F])', r'0\1\2', text)
+    
+    # Pattern 2: ตัวเลข 1 หลักที่อยู่หลังตัวอักษรไทย (กรณีวันอยู่หลังเดือน)
+    normalized = re.sub(r'([\u0E00-\u0E7F])(\d)$', r'\g<1>0\2', normalized)
+    
+    # Pattern 3: ตัวเลข 1 หลักระหว่างตัวอักษรไทย (กลาง string)
+    normalized = re.sub(r'([\u0E00-\u0E7F])(\d)([\u0E00-\u0E7F])', r'\g<1>0\2\3', normalized)
+    
     return normalized
 
 
@@ -237,6 +286,8 @@ def numbers_are_equal(num1_text, num2_text):
     """
     เปรียบเทียบตัวเลข 2 ตัวว่าเท่ากันไหม (แม้ format ต่างกัน)
     เช่น "1,000.00" == "1000" → True
+    
+    ใช้ Decimal สำหรับความแม่นยำในการเปรียบเทียบจำนวนเงิน
     """
     val1 = extract_number_value(num1_text)
     val2 = extract_number_value(num2_text)
@@ -244,14 +295,29 @@ def numbers_are_equal(num1_text, num2_text):
     if val1 is None or val2 is None:
         return False
     
-    # เปรียบเทียบค่า
     v1, v2 = val1[0], val2[0]
     
-    # ถ้าเป็น float เปรียบเทียบด้วย tolerance
-    if isinstance(v1, float) or isinstance(v2, float):
-        return abs(float(v1) - float(v2)) < 0.001
-    else:
-        return v1 == v2
+    # ใช้ Decimal สำหรับความแม่นยำสูง (จำนวนเงินประกัน)
+    try:
+        d1 = Decimal(str(v1))
+        d2 = Decimal(str(v2))
+        
+        # เปรียบเทียบ exact match สำหรับจำนวนเต็ม
+        if d1 == d1.to_integral_value() and d2 == d2.to_integral_value():
+            return d1.to_integral_value() == d2.to_integral_value()
+        
+        # สำหรับทศนิยม ใช้ relative tolerance 0.0001% (สำหรับ rounding errors)
+        if d2 != 0:
+            relative_diff = abs((d1 - d2) / d2)
+            return relative_diff < Decimal('0.000001')  # 0.0001%
+        else:
+            return d1 == 0
+    except (InvalidOperation, ZeroDivisionError):
+        # Fallback to original comparison
+        if isinstance(v1, float) or isinstance(v2, float):
+            return abs(float(v1) - float(v2)) < 0.001
+        else:
+            return v1 == v2
 
 
 def is_thai_number_word(text):
@@ -289,10 +355,14 @@ THAI_MONTHS = {
     'มกราคม': '01', 'กุมภาพันธ์': '02', 'มีนาคม': '03', 'เมษายน': '04',
     'พฤษภาคม': '05', 'มิถุนายน': '06', 'กรกฎาคม': '07', 'สิงหาคม': '08',
     'กันยายน': '09', 'ตุลาคม': '10', 'พฤศจิกายน': '11', 'ธันวาคม': '12',
-    # Short forms
+    # Short forms with dots
     'ม.ค.': '01', 'ก.พ.': '02', 'มี.ค.': '03', 'เม.ย.': '04',
     'พ.ค.': '05', 'มิ.ย.': '06', 'ก.ค.': '07', 'ส.ค.': '08',
-    'ก.ย.': '09', 'ต.ค.': '10', 'พ.ย.': '11', 'ธ.ค.': '12'
+    'ก.ย.': '09', 'ต.ค.': '10', 'พ.ย.': '11', 'ธ.ค.': '12',
+    # Short forms without dots (OCR อาจอ่านไม่มีจุด)
+    'มค': '01', 'กพ': '02', 'มีค': '03', 'เมย': '04',
+    'พค': '05', 'มิย': '06', 'กค': '07', 'สค': '08',
+    'กย': '09', 'ตค': '10', 'พย': '11', 'ธค': '12'
 }
 
 # คำ keywords ที่บอกว่าเป็นบรรทัดเกี่ยวกับวันที่
@@ -468,14 +538,14 @@ def is_form_label(text):
 def is_significant(text):
     """
     ตรวจสอบว่าคำนี้สำคัญพอที่จะ index และเปรียบเทียบหรือไม่
-    index ทุกคำที่มีความยาว >= 2 ตัวอักษร
+    index ทุกคำที่มีความยาว >= MIN_WORD_LENGTH ตัวอักษร
     """
     clean = clean_text(text)
     if not clean:
         return False
     
-    # คำที่สั้นเกินไป (1 ตัวอักษร) ไม่ index
-    if len(clean) < 2:
+    # คำที่สั้นเกินไป (< MIN_WORD_LENGTH) ไม่ index
+    if len(clean) < MIN_WORD_LENGTH:
         return False
     
     # ข้ามคำที่อยู่ใน stopwords (ไม่รวม FORM_LABELS เพราะต้อง index ไว้เพื่อ matching)
@@ -486,15 +556,54 @@ def is_significant(text):
     return True
 
 
+def get_full_text_from_index(index):
+    """
+    สร้าง full text จาก word index
+    ใช้สำหรับ date/time extraction
+    """
+    texts = []
+    by_page = index.get('by_page', {})
+    
+    # Sort by page number to maintain order
+    for page_num in sorted(by_page.keys()):
+        words = by_page[page_num]
+        page_text = ' '.join(w[4] for w in words)
+        texts.append(page_text)
+    
+    return ' '.join(texts)
+
+
 def ocr_single_image(img_np):
     """OCR รูปเดียว - thread-safe ด้วย lock"""
     with ocr_lock:
-        return reader.readtext(img_np)
+        return get_ocr_reader().readtext(img_np)
+
+
+def _process_ocr_bbox(bbox, text, prob, scale_x, scale_y):
+    """
+    Helper function สำหรับ process OCR bounding box
+    ลด code duplication ระหว่าง get_words_from_page_ocr และ process_page_ocr
+    """
+    if prob <= OCR_CONFIDENCE_THRESHOLD or not text.strip():
+        return None
+    
+    (tl, tr, br, bl) = bbox
+    x_min = min(tl[0], bl[0])
+    y_min = min(tl[1], tr[1])
+    x_max = max(tr[0], br[0])
+    y_max = max(bl[1], br[1])
+    
+    x0 = x_min * scale_x
+    y0 = y_min * scale_y
+    x1 = x_max * scale_x
+    y1 = y_max * scale_y
+    
+    return (x0, y0, x1, y1, text, 0, 0, 0)
 
 
 def get_words_from_page_ocr(page):
     """ดึงคำและพิกัดด้วย EasyOCR"""
-    pix = page.get_pixmap(dpi=300) 
+    pix = page.get_pixmap(dpi=OCR_DPI) 
     img_np = np.array(Image.open(io.BytesIO(pix.tobytes("png"))))
     
     # ใช้ thread-safe OCR
@@ -505,19 +614,9 @@ def get_words_from_page_ocr(page):
     scale_y = page.rect.height / pix.height
 
     for (bbox, text, prob) in results:
-        if prob > 0.2 and text.strip():
-            (tl, tr, br, bl) = bbox
-            x_min = min(tl[0], bl[0])
-            y_min = min(tl[1], tr[1])
-            x_max = max(tr[0], br[0])
-            y_max = max(bl[1], br[1])
-            
-            x0 = x_min * scale_x
-            y0 = y_min * scale_y
-            x1 = x_max * scale_x
-            y1 = y_max * scale_y
-            
-            words.append((x0, y0, x1, y1, text, 0, 0, 0))
+        word_tuple = _process_ocr_bbox(bbox, text, prob, scale_x, scale_y)
+        if word_tuple:
+            words.append(word_tuple)
     return words
 
 
@@ -530,7 +629,7 @@ def process_page_ocr(args):
         doc = fitz.open(pdf_path)
         page = doc[page_num]
         
-        pix = page.get_pixmap(dpi=300)
+        pix = page.get_pixmap(dpi=OCR_DPI)
         img_np = np.array(Image.open(io.BytesIO(pix.tobytes("png"))))
         
         # OCR with lock
@@ -541,25 +640,15 @@ def process_page_ocr(args):
         scale_y = page.rect.height / pix.height
         
         for (bbox, text, prob) in results:
-            if prob > 0.2 and text.strip():
-                (tl, tr, br, bl) = bbox
-                x_min = min(tl[0], bl[0])
-                y_min = min(tl[1], tr[1])
-                x_max = max(tr[0], br[0])
-                y_max = max(bl[1], br[1])
-                
-                x0 = x_min * scale_x
-                y0 = y_min * scale_y
-                x1 = x_max * scale_x
-                y1 = y_max * scale_y
-                
-                words.append((x0, y0, x1, y1, text, 0, 0, 0))
+            word_tuple = _process_ocr_bbox(bbox, text, prob, scale_x, scale_y)
+            if word_tuple:
+                words.append(word_tuple)
         
         doc.close()
         return page_num, words
         
     except Exception as e:
-        print(f"  → OCR failed for page {page_num}: {e}")
+        logger.error(f"OCR failed for page {page_num}: {e}")
         return page_num, []
 
 
@@ -701,13 +790,13 @@ def build_word_index(doc, progress_callback=None):
     return index
 
 
-def fuzzy_match_word(word, word_index, threshold=0.70):
+def fuzzy_match_word(word, word_index, threshold=FUZZY_THRESHOLD_DEFAULT):
     """หาคำที่คล้ายกันใน index - รองรับภาษาไทยที่ OCR อ่านวรรณยุกต์ต่างกัน"""
     clean = clean_text(word)
     normalized = normalize_for_compare(word)
     normalized_no_tone = normalize_thai_tones(normalized)  # ลบวรรณยุกต์
     
-    if not clean or len(clean) < 2:
+    if not clean or len(clean) < MIN_WORD_LENGTH:
         return []
     
     matches = []
@@ -833,10 +922,10 @@ def highlight_text_differences(pdf1_path, pdf2_path, mode='diff', progress_callb
         img2 = None
         
         if i < len(doc1):
-            pix = doc1[i].get_pixmap(dpi=150)
+            pix = doc1[i].get_pixmap(dpi=OUTPUT_DPI)
             img1 = Image.open(io.BytesIO(pix.tobytes("png")))
         if i < len(doc2):
-            pix = doc2[i].get_pixmap(dpi=150)
+            pix = doc2[i].get_pixmap(dpi=OUTPUT_DPI)
             img2 = Image.open(io.BytesIO(pix.tobytes("png")))
         
         # เพิ่ม Legend เฉพาะหน้าแรก
@@ -936,7 +1025,7 @@ def highlight_text_differences_db(pdf_path, db_document, mode='diff', progress_c
     images = []
     
     for i in range(doc1_pages):
-        pix = doc1[i].get_pixmap(dpi=150)
+        pix = doc1[i].get_pixmap(dpi=OUTPUT_DPI)
         img1 = Image.open(io.BytesIO(pix.tobytes("png")))
         
         # Add Legend on first page
@@ -1013,28 +1102,33 @@ def highlight_diff_mode_db(doc1, index1, db_index):
     db_words = db_index.get('by_word', {})
     words2 = set(db_words.keys())
     
-    # [NEW] สร้าง full text สำหรับ date comparison
-    def get_full_text(index):
-        texts = []
-        for page_num, words in index.get('by_page', {}).items():
-            page_text = ' '.join(w[4] for w in words)
-            texts.append(page_text)
-        return ' '.join(texts)
+    # สร้าง normalized lookup สำหรับ O(1) matching
+    normalized2 = {normalize_for_compare(w): w for w in words2}
     
-    full_text1 = get_full_text(index1)
-    full_text2 = get_full_text(db_index)
+    # สร้าง full text สำหรับ date comparison
+    full_text1 = get_full_text_from_index(index1)
+    full_text2 = get_full_text_from_index(db_index)
     
-    # [NEW] Extract all dates from both documents
+    # Extract all dates from both documents
     all_dates1 = extract_thai_dates(full_text1)
     all_dates2 = extract_thai_dates(full_text2)
     all_times1 = extract_times(full_text1)
     all_times2 = extract_times(full_text2)
     
-    # [NEW] Check if dates match globally
+    # Check if dates match globally
     dates_are_same = sorted(all_dates1) == sorted(all_dates2) if all_dates1 and all_dates2 else True
     times_are_same = sorted(all_times1) == sorted(all_times2) if all_times1 and all_times2 else True
     
     print(f"  → [Date Check] Dates match: {dates_are_same}, Times match: {times_are_same}")
+    
+    # Pre-compute normalized number values สำหรับ O(1) lookup
+    number_values2 = {}
+    for w2 in words2:
+        val = extract_number_value(w2)
+        if val:
+            # เก็บ normalized value สำหรับ lookup
+            normalized_val = smart_normalize_number(w2)
+            number_values2[normalized_val] = w2
     
     words_only_in_doc1 = set()
     
@@ -1042,32 +1136,44 @@ def highlight_diff_mode_db(doc1, index1, db_index):
         if clean_word in words2:
             continue
         
+        # ลอง normalized match
+        normalized_clean = normalize_for_compare(clean_word)
+        if normalized_clean in normalized2:
+            continue
+        
         # ดึง original text จาก index เพื่อตรวจสอบ
         original_text = ""
         if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
-            original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
+            original_text = index1['by_word'][clean_word][0][1][4]
         
-        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        # [เพิ่ม] ถ้าเป็น form label → ไม่ highlight
+        if is_form_label(original_text) or is_form_label(clean_word):
+            continue
+        
+        # ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
         if dates_are_same and is_date_related_word(original_text):
             continue
         
-        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        # ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
         if times_are_same:
             word_times = extract_times(original_text)
             if word_times:
                 continue
         
-        # Numbers and Thai number words use exact match only
+        # Numbers and Thai number words
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
-            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
             if dates_are_same:
                 if re.match(r'^25\d{2}$', clean_word):
                     continue
                 if re.match(r'^0?[1-9]$|^[12]\d$|^3[01]$', clean_word):
                     continue
-            words_only_in_doc1.add(clean_word)
+            
+            # ใช้ pre-computed lookup แทน O(n) loop
+            normalized_num = smart_normalize_number(clean_word)
+            if normalized_num not in number_values2:
+                words_only_in_doc1.add(clean_word)
         else:
-            matches = fuzzy_match_word_index(clean_word, db_words, threshold=0.80)
+            matches = fuzzy_match_word_index(clean_word, db_words, threshold=FUZZY_THRESHOLD_STRICT)
             if not matches:
                 words_only_in_doc1.add(clean_word)
     
@@ -1094,13 +1200,13 @@ def highlight_diff_mode_db(doc1, index1, db_index):
     }
 
 
-def fuzzy_match_word_index(word, word_index_by_word, threshold=0.70):
+def fuzzy_match_word_index(word, word_index_by_word, threshold=FUZZY_THRESHOLD_DEFAULT):
     """Fuzzy match against a by_word index (dict of word -> locations)"""
     clean = clean_text(word)
     normalized = normalize_for_compare(word)
     normalized_no_tone = normalize_thai_tones(normalized)
     
-    if not clean or len(clean) < 2:
+    if not clean or len(clean) < MIN_WORD_LENGTH:
         return []
     
     matches = []
@@ -1355,24 +1461,29 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
     normalized2 = {normalize_for_compare(w): w for w in words2}
     normalized1 = {normalize_for_compare(w): w for w in words1}
     
-    # [NEW] สร้าง full text จากทุก page สำหรับ date comparison
-    def get_full_text(index):
-        texts = []
-        for page_num, words in index.get('by_page', {}).items():
-            page_text = ' '.join(w[4] for w in words)
-            texts.append(page_text)
-        return ' '.join(texts)
+    # Pre-compute normalized number values สำหรับ O(1) lookup แทน O(n) loop
+    number_values1 = {}
+    number_values2 = {}
+    for w1 in words1:
+        val = extract_number_value(w1)
+        if val:
+            number_values1[smart_normalize_number(w1)] = w1
+    for w2 in words2:
+        val = extract_number_value(w2)
+        if val:
+            number_values2[smart_normalize_number(w2)] = w2
     
-    full_text1 = get_full_text(index1)
-    full_text2 = get_full_text(index2)
+    # ใช้ module-level function แทน local function
+    full_text1 = get_full_text_from_index(index1)
+    full_text2 = get_full_text_from_index(index2)
     
-    # [NEW] Extract all dates from both documents
+    # Extract all dates from both documents
     all_dates1 = extract_thai_dates(full_text1)
     all_dates2 = extract_thai_dates(full_text2)
     all_times1 = extract_times(full_text1)
     all_times2 = extract_times(full_text2)
     
-    # [NEW] Check if dates match globally
+    # Check if dates match globally
     dates_are_same = sorted(all_dates1) == sorted(all_dates2) if all_dates1 and all_dates2 else True
     times_are_same = sorted(all_times1) == sorted(all_times2) if all_times1 and all_times2 else True
     
@@ -1405,15 +1516,15 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
             original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
-        # [NEW] ถ้าเป็น form label → ไม่ highlight
+        # ถ้าเป็น form label → ไม่ highlight
         if is_form_label(original_text) or is_form_label(clean_word):
             continue
         
-        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        # ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
         if dates_are_same and is_date_related_word(original_text):
             continue
         
-        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        # ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
         if times_are_same:
             word_times = extract_times(original_text)
             if word_times:
@@ -1421,7 +1532,7 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         
         # ถ้าเป็นตัวเลข หรือ จำนวนเงินตัวหนังสือ → ลองเทียบเป็นตัวเลข
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
-            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
+            # ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
             if dates_are_same:
                 # ถ้าตัวเลขนี้เป็นปี (2500-2600) หรือ วัน (1-31) → ข้าม
                 if re.match(r'^25\d{2}$', clean_word):
@@ -1431,21 +1542,13 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
                     if any(clean_word in d for d in all_dates1):
                         continue
             
-            # ลองเปรียบเทียบเป็น numeric value
-            val1 = extract_number_value(clean_word)
-            if val1:
-                found_match = False
-                for w2 in words2:
-                    if numbers_are_equal(clean_word, w2):
-                        found_match = True
-                        break
-                if not found_match:
-                    words_only_in_doc1.add(clean_word)
-            else:
+            # ใช้ pre-computed lookup O(1) แทน O(n) loop
+            normalized_num = smart_normalize_number(clean_word)
+            if normalized_num not in number_values2:
                 words_only_in_doc1.add(clean_word)
         else:
             # ถ้าไม่ใช่ตัวเลข → ลอง fuzzy match
-            matches = fuzzy_match_word(clean_word, index2, threshold=0.80)
+            matches = fuzzy_match_word(clean_word, index2, threshold=FUZZY_THRESHOLD_STRICT)
             if not matches:
                 words_only_in_doc1.add(clean_word)
     
@@ -1464,22 +1567,22 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in index2['by_word'] and index2['by_word'][clean_word]:
             original_text = index2['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
-        # [NEW] ถ้าเป็น form label → ไม่ highlight
+        # ถ้าเป็น form label → ไม่ highlight
         if is_form_label(original_text) or is_form_label(clean_word):
             continue
         
-        # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
+        # ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
         if dates_are_same and is_date_related_word(original_text):
             continue
         
-        # [NEW] ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
+        # ถ้าเป็นเวลา และเวลาทั้งสองเอกสารเหมือนกัน → ข้าม
         if times_are_same:
             word_times = extract_times(original_text)
             if word_times:
                 continue
         
         if any(c.isdigit() for c in clean_word) or is_thai_number_word(original_text):
-            # [NEW] ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
+            # ตรวจสอบว่าเป็นส่วนของวันที่หรือไม่
             if dates_are_same:
                 if re.match(r'^25\d{2}$', clean_word):
                     continue
@@ -1487,19 +1590,12 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
                     if any(clean_word in d for d in all_dates2):
                         continue
             
-            val2 = extract_number_value(clean_word)
-            if val2:
-                found_match = False
-                for w1 in words1:
-                    if numbers_are_equal(clean_word, w1):
-                        found_match = True
-                        break
-                if not found_match:
-                    words_only_in_doc2.add(clean_word)
-            else:
+            # ใช้ pre-computed lookup O(1) แทน O(n) loop
+            normalized_num = smart_normalize_number(clean_word)
+            if normalized_num not in number_values1:
                 words_only_in_doc2.add(clean_word)
         else:
-            matches = fuzzy_match_word(clean_word, index1, threshold=0.80)
+            matches = fuzzy_match_word(clean_word, index1, threshold=FUZZY_THRESHOLD_STRICT)
             if not matches:
                 words_only_in_doc2.add(clean_word)
     
