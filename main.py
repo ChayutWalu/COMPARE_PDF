@@ -1,7 +1,7 @@
 import sys
 import os
 import argparse
-from ocr_processor import extract_text_from_pdf
+from ocr_processor_paddle import extract_text_from_pdf
 from llm_client import TyphoonClient
 
 def process_files(pdf1_path, pdf2_path, language='en', mode='diff', progress_callback=None):

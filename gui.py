@@ -3,7 +3,7 @@ from tkinter import filedialog, messagebox
 import tkinter as tk
 from PIL import ImageTk, Image
 import threading
-from ocr_processor import highlight_text_differences, highlight_text_differences_db
+from ocr_processor_paddle import highlight_text_differences, highlight_text_differences_db
 import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
