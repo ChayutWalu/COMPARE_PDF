@@ -32,6 +32,50 @@ STOPWORDS = {
     "road", "soi", "district", "province",
     "the", "a", "an", "is", "are", "of", "to", "in", "for", "on", "with"
 }
+
+# --- FORM_LABELS: หัวข้อ/labels ของ form ที่ไม่ควร highlight ---
+# เพราะเป็นส่วนของ template ไม่ใช่ข้อมูลที่ต้องเปรียบเทียบ
+# แบ่งเป็น 2 กลุ่ม: exact match และ partial match
+
+# คำที่ต้อง exact match เท่านั้น (คำสั้นที่อาจไปซ้อนกับคำอื่น)
+FORM_LABELS_EXACT = {
+    # หน่วย (ต้อง exact match เท่านั้น)
+    "u", "hr", "น", "baht", "sq", "m2",
+    # คำสั้น
+    "to", "from", "no", "of", "as", "at", "on", "per",
+    "sum", "vat", "tax", "net", "rate", "area", "code",
+    "และ", "หรือ", "and", "or", "ที่", "ณ",
+}
+
+# คำที่ใช้ partial match ได้ (คำยาวที่ไม่ค่อยซ้อนกับข้อมูลจริง)
+FORM_LABELS_PARTIAL = {
+    # หัวข้อทั่วไป
+    "เวลา", "time", "เริ่มต้น", "สิ้นสุด",
+    "ตำแหน่ง", "จังหวัด", "อำเภอ", "ตำบล", "รหัสไปรษณีย์",
+    "district", "province", "subdistrict", "block", "บล็อก",
+    
+    # หัวข้อกรมธรรม์ประกันภัย
+    "ตารางที่", "รายการที่", "ลำดับที่", "itemno",
+    "รายละเอียด", "description", "จำนวนเงิน", "amount",
+    "ความเสียหาย", "deductible", "ส่วนแรก", "excess",
+    "จำนวนชั้น", "จำนวนอาคาร", "จำนวนห้อง", "storey", "building",
+    "พื้นที่", "ภายใน", "internal", "total",
+    "สถานที่", "occupancy", "รหัสภัย", "riskcode",
+    "ชั้นของ", "class", "สิ่งปลูกสร้าง", "construction",
+    "เจ้าของ", "owner", "ผู้เช่า", "tenant",
+    "เบี้ยประกัน", "premium", "อากรแสตมป์", "stamp", "duty",
+    "ภาษี", "รวม", "สุทธิ",
+    "อัตรา", "เงื่อนไข", "condition", "clause",
+    "ข้อตกลง", "agreement", "วันที่ทำ", "issued", "made",
+    "ตัวแทน", "agent", "นายหน้า", "broker", "ใบอนุญาต", "license",
+    "โดยตรง", "direct", "กรมธรรม์", "policy",
+}
+
+# รวมทั้งหมดสำหรับ backward compatibility
+FORM_LABELS = FORM_LABELS_EXACT | FORM_LABELS_PARTIAL
+
+# รวม FORM_LABELS เข้ากับ STOPWORDS สำหรับการ filter
+ALL_SKIP_WORDS = STOPWORDS | FORM_LABELS
 # หมายเหตุ: ลบ "คุณ" ออกจาก STOPWORDS เพราะมักติดกับชื่อคน
 
 # =====================================================
@@ -377,6 +421,50 @@ def times_match(text1, text2):
     return False  # มีฝั่งเดียว
 
 
+def is_form_label(text):
+    """
+    ตรวจสอบว่าคำนี้เป็น form label/header หรือไม่
+    ใช้สำหรับไม่ highlight คำที่เป็นส่วนของ template
+    
+    ใช้ 2 วิธี:
+    1. EXACT match สำหรับคำสั้น (เพื่อไม่ให้ไปซ้อนกับคำอื่น)
+    2. PARTIAL match สำหรับคำยาว (หัวข้อ form ที่ชัดเจน)
+    """
+    clean = clean_text(text)
+    original_lower = text.lower().strip()
+    
+    if not clean:
+        return False
+    
+    # 1. Exact match กับ FORM_LABELS_EXACT
+    if clean in FORM_LABELS_EXACT:
+        return True
+    
+    # 2. Exact match กับ FORM_LABELS_PARTIAL (ทั้งคำ)
+    if clean in FORM_LABELS_PARTIAL:
+        return True
+    
+    # 3. Partial match เฉพาะกับ FORM_LABELS_PARTIAL (คำยาวที่ปลอดภัย)
+    # เฉพาะคำที่ยาว >= 4 ตัวอักษร เพื่อหลีกเลี่ยง false positive
+    for label in FORM_LABELS_PARTIAL:
+        if len(label) >= 4:  # เฉพาะ label ที่ยาวพอ
+            if label in clean or label in original_lower:
+                return True
+    
+    # 4. ตรวจสอบ pattern ของ form labels
+    # เฉพาะคำยาวที่เริ่มต้นด้วย prefix ที่ชัดเจน
+    label_prefixes = [
+        'รายละเอียด', 'จำนวน', 'พื้นที่', 'สถานที่', 'ชั้นของ',
+        'description', 'amount', 'number', 'location',
+        'ความเสียหาย', 'อัตรา', 'เงื่อนไข', 'ข้อตกลง'
+    ]
+    for prefix in label_prefixes:
+        if clean.startswith(prefix) or original_lower.startswith(prefix):
+            return True
+    
+    return False
+
+
 def is_significant(text):
     """
     ตรวจสอบว่าคำนี้สำคัญพอที่จะ index และเปรียบเทียบหรือไม่
@@ -390,7 +478,7 @@ def is_significant(text):
     if len(clean) < 2:
         return False
     
-    # ข้ามคำที่อยู่ใน stopwords
+    # ข้ามคำที่อยู่ใน stopwords (ไม่รวม FORM_LABELS เพราะต้อง index ไว้เพื่อ matching)
     if clean in STOPWORDS:
         return False
     
@@ -1317,6 +1405,10 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         if clean_word in index1['by_word'] and index1['by_word'][clean_word]:
             original_text = index1['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
         
+        # [NEW] ถ้าเป็น form label → ไม่ highlight
+        if is_form_label(original_text) or is_form_label(clean_word):
+            continue
+        
         # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
         if dates_are_same and is_date_related_word(original_text):
             continue
@@ -1371,6 +1463,10 @@ def highlight_diff_mode(doc1, doc2, index1, index2):
         original_text = ""
         if clean_word in index2['by_word'] and index2['by_word'][clean_word]:
             original_text = index2['by_word'][clean_word][0][1][4]  # เอา text จาก word tuple
+        
+        # [NEW] ถ้าเป็น form label → ไม่ highlight
+        if is_form_label(original_text) or is_form_label(clean_word):
+            continue
         
         # [NEW] ถ้าเป็นคำที่เกี่ยวกับวันที่ และวันที่ทั้งสองเอกสารเหมือนกัน → ข้าม
         if dates_are_same and is_date_related_word(original_text):
