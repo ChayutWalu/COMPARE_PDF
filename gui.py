@@ -3,13 +3,15 @@ from tkinter import filedialog, messagebox
 import tkinter as tk
 from PIL import ImageTk, Image
 import threading
-from ocr_processor import highlight_text_differences, highlight_text_differences_db
+import io
+from ocr_processor import highlight_text_differences, highlight_text_differences_db, extract_text_from_pdf
 import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.utils import ImageReader
 
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
@@ -25,6 +27,7 @@ class App(ctk.CTk):
         self.pdf2_path = ""
         self.generated_image_pairs = []
         self.comparison_summary = {}
+        self.llm_result = ""  # สำหรับ Hybrid mode
         
         # Database mode
         self.db_mode = False
@@ -85,24 +88,29 @@ class App(ctk.CTk):
         self.db_upload_btn = ctk.CTkButton(self.db_frame, text="📤 Upload New", command=self.upload_to_database, width=100, fg_color="#27ae60")
         self.db_upload_btn.pack(side="left")
 
-        # --- Settings Frame (Language & Mode) ---
+        # --- Settings Frame (Mode) ---
         self.settings_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.settings_frame.grid(row=3, column=0, columnspan=2, pady=10)
-        
-        # Language
-        self.lang_label = ctk.CTkLabel(self.settings_frame, text="Language:")
-        self.lang_label.pack(side="left", padx=(0, 10))
-        self.lang_combobox = ctk.CTkComboBox(self.settings_frame, values=["English", "Thai (ภาษาไทย)"], state="readonly", width=140)
-        self.lang_combobox.pack(side="left", padx=(0, 20))
-        self.lang_combobox.set("Thai (ภาษาไทย)")
 
         # Mode Selection
         self.mode_label = ctk.CTkLabel(self.settings_frame, text="Mode:")
         self.mode_label.pack(side="left", padx=(0, 10))
         self.mode_var = ctk.StringVar(value="diff")
         self.mode_switch = ctk.CTkSegmentedButton(self.settings_frame, values=["Find Differences", "Find Matches"], variable=self.mode_var)
-        self.mode_switch.pack(side="left")
+        self.mode_switch.pack(side="left", padx=(0, 20))
         self.mode_switch.set("Find Differences")
+
+        # Analysis Type (OCR only vs Hybrid)
+        self.analysis_label = ctk.CTkLabel(self.settings_frame, text="Analysis:", font=("Arial", 11))
+        self.analysis_label.pack(side="left", padx=(20, 10))
+        self.analysis_var = ctk.StringVar(value="ocr")
+        self.analysis_switch = ctk.CTkSegmentedButton(
+            self.settings_frame,
+            values=["OCR only", "Hybrid (OCR+LLM)"],
+            variable=self.analysis_var,
+        )
+        self.analysis_switch.pack(side="left")
+        self.analysis_switch.set("OCR only")
 
         # Run Button
         self.run_btn = ctk.CTkButton(self, text="Compare Documents", command=self.start_processing, height=40, font=("Arial", 14, "bold"))
@@ -226,41 +234,44 @@ class App(ctk.CTk):
     def select_pdf1(self):
         filename = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
         if filename:
+            if not os.path.exists(filename):
+                messagebox.showerror("Error", "Selected file does not exist.")
+                return
             self.pdf1_path = filename
             self.label1.configure(text=os.path.basename(filename))
 
     def select_pdf2(self):
         filename = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
         if filename:
+            if not os.path.exists(filename):
+                messagebox.showerror("Error", "Selected file does not exist.")
+                return
             self.pdf2_path = filename
             self.label2.configure(text=os.path.basename(filename))
 
     def start_processing(self):
         if not self.pdf1_path:
-            self.append_text("Please select a PDF file.\n")
+            messagebox.showwarning("Missing Input", "Please select a PDF file.")
             return
         
         if self.db_mode:
             # Database mode - check if document selected
             selected = self.db_combobox.get()
             if not selected or selected in ["Loading...", "No documents found", "Error loading"]:
-                self.append_text("Please select a reference document from the database.\n")
+                messagebox.showwarning("Missing Input", "Please select a reference document from the database.")
                 return
             # Find the selected document
             doc_id = selected.split(" (")[0]
             self.selected_db_doc = next((d for d in self.db_documents if d['document_id'] == doc_id), None)
             if not self.selected_db_doc:
-                self.append_text("Error: Could not find selected document.\n")
+                messagebox.showerror("Error", "Could not find selected document.")
                 return
         else:
             # File mode - check PDF 2
             if not self.pdf2_path:
-                self.append_text("Please select both PDF files.\n")
+                messagebox.showwarning("Missing Input", "Please select both PDF files.")
                 return
 
-        selected_lang_str = self.lang_combobox.get()
-        lang_code = 'th' if "Thai" in selected_lang_str else 'en'
-        
         mode_ui = self.mode_var.get()
         mode_val = 'same' if mode_ui == "Find Matches" else 'diff'
 
@@ -270,16 +281,18 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
         self.progress_label.configure(text="Starting...")
         
+        self.llm_result = ""
+        is_hybrid = "Hybrid" in self.analysis_var.get()
         if self.db_mode:
-            self.append_text(f"Starting comparison... (Mode: {mode_ui}, Source: Database)\n")
-            thread = threading.Thread(target=self.process_thread_db, args=(lang_code, mode_val))
+            self.append_text(f"Starting comparison... (Mode: {mode_ui}, {'Hybrid' if is_hybrid else 'OCR'}, Source: Database)\n")
+            thread = threading.Thread(target=self.process_thread_db, args=(mode_val, is_hybrid))
         else:
-            self.append_text(f"Starting processing... (Mode: {mode_ui})\n")
-            thread = threading.Thread(target=self.process_thread, args=(lang_code, mode_val))
+            self.append_text(f"Starting processing... (Mode: {mode_ui}, {'Hybrid' if is_hybrid else 'OCR'})\n")
+            thread = threading.Thread(target=self.process_thread, args=(mode_val, is_hybrid))
         
         thread.start()
 
-    def process_thread_db(self, lang_code, mode_val):
+    def process_thread_db(self, mode_val, is_hybrid=False):
         """Process comparison against database"""
         try:
             self.after(0, lambda: self.progress_bar.set(0))
@@ -296,7 +309,7 @@ class App(ctk.CTk):
             
             self.update_progress(f"✅ Loaded {doc_id} from database ({db_doc.get('page_count', 0)} pages)")
             
-            # Run comparison
+            # Run OCR comparison
             self.update_progress("\nGenerating visual highlights...")
             self.after(0, lambda: self.progress_label.configure(text="Generating visual highlights..."))
             
@@ -322,6 +335,10 @@ class App(ctk.CTk):
             if self.comparison_summary:
                 self.after(0, self.display_summary, self.comparison_summary)
             
+            # Hybrid: Run LLM analysis
+            if is_hybrid:
+                self._run_llm_analysis_db(mode_val, db_doc)
+            
             self.after(0, self.display_images, self.generated_image_pairs)
             self.enable_save()
             self.update_progress("\n✅ Visual comparison ready!")
@@ -331,18 +348,19 @@ class App(ctk.CTk):
         except Exception as e:
             self.update_progress(f"An error occurred: {e}")
             self.after(0, lambda: self.progress_label.configure(text=f"❌ Error: {e}"))
+            self.after(0, lambda err=str(e): messagebox.showerror("Comparison Error", f"An error occurred:\n{err}"))
             import traceback
             traceback.print_exc()
         finally:
             self.after(0, lambda: self.run_btn.configure(state="normal"))
 
-    def process_thread(self, lang_code, mode_val):
+    def process_thread(self, mode_val, is_hybrid=False):
         try:
             # Reset progress
             self.after(0, lambda: self.progress_bar.set(0))
             self.after(0, lambda: self.progress_label.configure(text="Starting..."))
             
-            # Generate visual highlights
+            # Generate visual highlights (OCR)
             self.update_progress("Generating visual highlights...")
             self.after(0, lambda: self.progress_label.configure(text="Generating visual highlights..."))
             
@@ -354,16 +372,18 @@ class App(ctk.CTk):
             
             result = highlight_text_differences(self.pdf1_path, self.pdf2_path, mode=mode_val, progress_callback=visual_progress)
             
-            # รองรับทั้ง return แบบเก่า (list) และแบบใหม่ (tuple)
             if isinstance(result, tuple):
                 self.generated_image_pairs, self.comparison_summary = result
             else:
                 self.generated_image_pairs = result
                 self.comparison_summary = {}
             
-            # แสดง Summary ใน textbox
             if self.comparison_summary:
                 self.after(0, self.display_summary, self.comparison_summary)
+            
+            # Hybrid: Run LLM analysis
+            if is_hybrid:
+                self._run_llm_analysis(mode_val)
             
             self.after(0, self.display_images, self.generated_image_pairs)
             self.enable_save()
@@ -374,10 +394,67 @@ class App(ctk.CTk):
         except Exception as e:
             self.update_progress(f"An error occurred: {e}")
             self.after(0, lambda: self.progress_label.configure(text=f"❌ Error: {e}"))
+            self.after(0, lambda err=str(e): messagebox.showerror("Comparison Error", f"An error occurred:\n{err}"))
             import traceback
             traceback.print_exc()
         finally:
             self.after(0, lambda: self.run_btn.configure(state="normal"))
+
+    def _run_llm_analysis(self, mode_val):
+        """Run LLM comparison for File vs File (Hybrid mode)"""
+        try:
+            self.update_progress("\n🤖 Running LLM analysis (Typhoon)...")
+            self.after(0, lambda: self.progress_label.configure(text="Running LLM analysis..."))
+            
+            text1 = extract_text_from_pdf(self.pdf1_path)
+            text2 = extract_text_from_pdf(self.pdf2_path)
+            
+            if not text1.strip() or not text2.strip():
+                self.update_progress("⚠️ LLM skipped: Could not extract enough text from PDFs.")
+                return
+            
+            from llm_client import TyphoonClient
+            client = TyphoonClient()
+            llm_result = client.compare_documents(text1, text2, language='th', mode=mode_val)
+            self.llm_result = llm_result
+            
+            self.update_progress("\n" + "="*60 + "\n")
+            self.update_progress("🤖 LLM ANALYSIS (Typhoon)\n")
+            self.update_progress("="*60 + "\n")
+            self.update_progress(llm_result)
+            self.update_progress("\n" + "="*60 + "\n")
+            
+        except Exception as e:
+            self.update_progress(f"\n⚠️ LLM analysis failed: {e}")
+            self.llm_result = f"Error: {e}"
+
+    def _run_llm_analysis_db(self, mode_val, db_doc):
+        """Run LLM comparison for File vs Database (Hybrid mode)"""
+        try:
+            self.update_progress("\n🤖 Running LLM analysis (Typhoon)...")
+            self.after(0, lambda: self.progress_label.configure(text="Running LLM analysis..."))
+            
+            text1 = extract_text_from_pdf(self.pdf1_path)
+            text2 = db_doc.get('extracted_text', '') or ''
+            
+            if not text1.strip() or not text2.strip():
+                self.update_progress("⚠️ LLM skipped: Could not extract enough text.")
+                return
+            
+            from llm_client import TyphoonClient
+            client = TyphoonClient()
+            llm_result = client.compare_documents(text1, text2, language='th', mode=mode_val)
+            self.llm_result = llm_result
+            
+            self.update_progress("\n" + "="*60 + "\n")
+            self.update_progress("🤖 LLM ANALYSIS (Typhoon)\n")
+            self.update_progress("="*60 + "\n")
+            self.update_progress(llm_result)
+            self.update_progress("\n" + "="*60 + "\n")
+            
+        except Exception as e:
+            self.update_progress(f"\n⚠️ LLM analysis failed: {e}")
+            self.llm_result = f"Error: {e}"
 
     def display_summary(self, summary):
         """แสดง Summary ใน textbox"""
@@ -577,29 +654,121 @@ class App(ctk.CTk):
             try:
                 with open(filename, "w", encoding="utf-8") as f:
                     f.write(self.textbox.get("1.0", "end"))
+                messagebox.showinfo("Success", f"Saved to {filename}")
             except Exception as e:
-                pass
+                messagebox.showerror("Error", f"Failed to save: {e}")
 
     def export_pdf_report(self):
-        if not self.generated_image_pairs: return
+        if not self.generated_image_pairs:
+            messagebox.showwarning("No data", "Please run comparison first.")
+            return
         file_path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF File", "*.pdf")])
-        if not file_path: return
+        if not file_path:
+            return
         try:
             c = canvas.Canvas(file_path, pagesize=A4)
             width, height = A4
-            font_path = "THSarabunNew.ttf" 
-            if os.path.exists(font_path):
-                pdfmetrics.registerFont(TTFont('THSarabun', font_path))
-                c.setFont("THSarabun", 16)
-            else:
-                c.setFont("Helvetica", 12)
+            margin = 20 * mm
             
-            c.drawString(20*mm, height - 20*mm, f"Comparison Report (Mode: {self.mode_var.get()})")
+            # Thai font - ลองหลาย path (project, Windows Fonts)
+            font_name = "Helvetica"
+            thai_font_paths = [
+                "THSarabunNew.ttf",
+                os.path.join(os.path.dirname(__file__), "THSarabunNew.ttf"),
+                r"C:\Windows\Fonts\THSarabunNew.ttf",
+                r"C:\Windows\Fonts\thsarabunnew.ttf",
+            ]
+            for font_path in thai_font_paths:
+                if font_path and os.path.exists(font_path):
+                    try:
+                        pdfmetrics.registerFont(TTFont('THSarabun', font_path))
+                        font_name = "THSarabun"
+                        break
+                    except Exception:
+                        continue
+            
+            c.setFont(font_name, 16)
+            y = height - margin
+            
+            # Title
+            c.drawString(margin, y, f"PDF Comparison Report - {self.mode_var.get()}")
+            y -= 25
+            
+            # Summary section
+            c.setFont(font_name, 11)
+            summary = self.comparison_summary
+            if summary:
+                mode_text = "Finding MATCHES" if summary.get('mode') == 'same' else "Finding DIFFERENCES"
+                lines = [
+                    f"Mode: {mode_text}",
+                    f"Document 1: {summary.get('doc1_name', 'N/A')}",
+                    f"  Pages: {summary.get('doc1_pages', 0)}, Words: {summary.get('doc1_total_words', 0)}, Unique: {summary.get('doc1_unique_words', 0)}",
+                    f"Document 2: {summary.get('doc2_name', 'N/A')}",
+                    f"  Pages: {summary.get('doc2_pages', 0)}, Words: {summary.get('doc2_total_words', 0)}, Unique: {summary.get('doc2_unique_words', 0)}",
+                ]
+                if summary.get('mode') == 'same':
+                    lines.append(f"Matched words - Doc1: {summary.get('matched_doc1', 0)}, Doc2: {summary.get('matched_doc2', 0)}")
+                else:
+                    lines.append(f"Words only in Doc1: {summary.get('diff_doc1', 0)}, Words only in Doc2: {summary.get('diff_doc2', 0)}")
+                    sample1 = summary.get('sample_doc1', [])[:5]
+                    sample2 = summary.get('sample_doc2', [])[:5]
+                    if sample1:
+                        lines.append(f"Sample Doc1: {sample1}")
+                    if sample2:
+                        lines.append(f"Sample Doc2: {sample2}")
+                
+                # Add LLM result if Hybrid mode was used
+                if self.llm_result:
+                    lines.append("")
+                    lines.append("--- LLM Analysis (Typhoon) ---")
+                    for llm_line in self.llm_result.split("\n")[:50]:
+                        lines.append(llm_line[:100])
+                
+                for line in lines:
+                    if y < margin + 50:
+                        c.showPage()
+                        y = height - margin
+                        c.setFont(font_name, 11)
+                    c.drawString(margin, y, line[:100])
+                    y -= 14
+            
             c.showPage()
+            
+            # Add comparison images
+            img_width = (width - 3 * margin) / 2
+            max_img_height = 350
+            
+            for idx, (img1, img2) in enumerate(self.generated_image_pairs):
+                y = height - margin
+                c.setFont(font_name, 12)
+                c.drawString(margin, y, f"Page {idx + 1}")
+                y -= 25
+                
+                images_to_draw = [(img1, "Doc1"), (img2, "Doc2")]
+                has_single = (img1 is None) != (img2 is None)
+                
+                for col, (img, label) in enumerate(images_to_draw):
+                    if img is None:
+                        continue
+                    buf = io.BytesIO()
+                    img.save(buf, format='PNG')
+                    buf.seek(0)
+                    ir = ImageReader(buf)
+                    iw, ih = img.size
+                    scale = min(img_width / iw, max_img_height / ih, 1.0)
+                    dw, dh = iw * scale, ih * scale
+                    x_pos = margin if (has_single or col == 0) else margin + img_width + margin
+                    c.drawString(x_pos, y + 5, label)
+                    c.drawImage(ir, x_pos, y - dh, width=dw, height=dh)
+                    if has_single:
+                        break
+                
+                c.showPage()
+            
             c.save()
-            messagebox.showinfo("Success", "Saved")
+            messagebox.showinfo("Success", f"Report saved to {file_path}")
         except Exception as e:
-            messagebox.showerror("Error", f"{e}")
+            messagebox.showerror("Error", f"Failed to save PDF: {e}")
 
 def run_gui():
     app = App()

@@ -35,3 +35,4 @@ reportlab>=4.0.0
 
 # Utilities
 tqdm>=4.65.0
+rapidfuzz>=3.0.0
