@@ -15,27 +15,26 @@ def process_files(pdf1_path, pdf2_path, language='en', mode='diff', progress_cal
         if progress_callback:
             progress_callback(msg)
 
-    log("Initializing Typhoon Client...")
+    log("Initializing...")
+    log("  → OCR: Typhoon OCR 1.5 via Ollama (LOCAL - ข้อมูลไม่ออกนอกเครื่อง)")
+    log("  → LLM: Typhoon Qwen v2.5-30b via API (สรุปและเปรียบเทียบ)")
     client = TyphoonClient()
 
-    log(f"\nProcessing {pdf1_path}...")
+    log(f"\n[LOCAL OCR] Processing {pdf1_path}...")
     try:
-        text1 = extract_text_from_pdf(pdf1_path)
+        text1, engine1 = extract_text_from_pdf(pdf1_path)
+        log(f"  ✅ อ่านข้อความด้วย: {'Typhoon OCR 1.5 (Local)' if engine1 == 'typhoon' else 'EasyOCR (fallback)'}")
     except Exception as e:
         return f"Error processing {pdf1_path}: {e}"
         
-    log(f"\nProcessing {pdf2_path}...")
+    log(f"\n[LOCAL OCR] Processing {pdf2_path}...")
     try:
-        text2 = extract_text_from_pdf(pdf2_path)
+        text2, engine2 = extract_text_from_pdf(pdf2_path)
+        log(f"  ✅ อ่านข้อความด้วย: {'Typhoon OCR 1.5 (Local)' if engine2 == 'typhoon' else 'EasyOCR (fallback)'}")
     except Exception as e:
         return f"Error processing {pdf2_path}: {e}"
     
-    # ถ้าเป็นโหมด Same อาจจะข้าม Classification ได้ถ้าต้องการประหยัดเวลา แต่ใส่ไว้ก่อน
-    # log(f"\nClassifying Document 1...")
-    # classification1 = client.classify_document(text1, language=language)
-    # log(f"--> Result:\n{classification1}\n")
-    
-    log(f"Comparing Documents (Mode: {mode.upper()})...")
+    log(f"\n[API] Comparing with Typhoon Qwen (Mode: {mode.upper()})...")
     comparison = client.compare_documents(text1, text2, language=language, mode=mode)
     log(f"--> Comparison Result:\n{comparison}\n")
     

@@ -1,10 +1,31 @@
+"""
+Typhoon LLM Client
+===================
+ใช้ Typhoon v2.5-30b-a3b-instruct (Typhoon Qwen) สำหรับ:
+- สรุปเนื้อหาเอกสาร
+- เปรียบเทียบและหาจุดต่างระหว่างเอกสาร
+- วิเคราะห์ประเภทเอกสาร
+
+หมายเหตุ: การอ่านข้อความ (OCR) ใช้ Typhoon OCR 1.5 ใน ocr_engine.py
+"""
+
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Model constants
+TYPHOON_LLM_MODEL = "typhoon-v2.5-30b-a3b-instruct"  # สำหรับสรุปและเปรียบเทียบ
+TYPHOON_API_BASE = "https://api.opentyphoon.ai/v1"
+
+
 class TyphoonClient:
+    """
+    Client สำหรับ Typhoon LLM (Qwen-based)
+    ใช้สำหรับวิเคราะห์ สรุป และเปรียบเทียบเอกสาร
+    (ไม่ใช่ OCR - OCR ใช้ Typhoon OCR 1.5 แยกต่างหาก)
+    """
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("TYPHOON_API_KEY")
         if not self.api_key:
@@ -13,9 +34,10 @@ class TyphoonClient:
         
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url="https://api.opentyphoon.ai/v1"
+            base_url=TYPHOON_API_BASE
         )
-        self.model = "typhoon-v2.5-30b-a3b-instruct"
+        # Typhoon Qwen - สำหรับสรุปเนื้อหาและหาจุดต่าง
+        self.model = TYPHOON_LLM_MODEL
 
     def classify_document(self, text, language='en'):
         if language == 'th':

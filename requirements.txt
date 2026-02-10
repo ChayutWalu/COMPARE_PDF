@@ -2,6 +2,10 @@
 # Compatible with macOS, Windows, and Linux
 
 # OCR Engine
+# Typhoon OCR 1.5 รันผ่าน Ollama (LOCAL) - ไม่ต้อง pip install
+# ติดตั้ง Ollama แล้วรัน: ollama pull scb10x/typhoon-ocr1.5-3b
+
+# EasyOCR - สำหรับ bounding box extraction (visual highlighting)
 easyocr>=1.7.0
 
 # PDF Processing
