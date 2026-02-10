@@ -1,11 +1,10 @@
 """
-OCR Processor - PDF Comparison (Typhoon OCR เป็นตัวอ่านหลัก)
+OCR Processor - PDF Comparison (PaddleOCR เป็นตัวอ่านหลัก)
 =============================================================
-ใช้ Typhoon OCR 1.5 อ่านข้อความจริง ๆ ทั้งระบบ (เปรียบเทียบ + ไฮไลท์ + สรุป)
+ใช้ PaddleOCR อ่านข้อความ + ให้ bounding box (LOCAL, เร็ว, ไทย+อังกฤษ)
 
-- อ่านข้อความ: Typhoon OCR 1.5 via Ollama (LOCAL) ← ตัวอ่านหลัก
-- ตำแหน่งคำ:   EasyOCR (bbox สำหรับวาดไฮไลท์ เพราะ Typhoon ไม่คืน bbox)
-- สรุป/เปรียบเทียบ: Typhoon Qwen v2.5-30b (API) — llm_client.py
+- อ่านข้อความ + bbox: PaddleOCR (LOCAL)
+- สรุป/เปรียบเทียบ:    Typhoon Qwen v2.5-30b (API) — llm_client.py
 
 Modules:
 - config: Configuration, constants
@@ -13,7 +12,7 @@ Modules:
 - number_utils: ตัวเลข, จำนวนเงิน
 - date_utils: วันที่ไทย
 - word_analysis: is_form_label, is_significant
-- ocr_engine: Typhoon OCR (local) + EasyOCR, extract_text_from_pdf
+- ocr_engine: PaddleOCR, extract_text_from_pdf
 - indexing: build_word_index
 - fuzzy_matching: fuzzy_match_word
 - highlighting: highlight_same_mode, highlight_diff_mode
@@ -29,12 +28,11 @@ from .config import (
     DEBUG_MODE, FORCE_OCR, PARALLEL_OCR, MAX_OCR_WORKERS, USE_PROCESS_POOL,
     STOPWORDS, FORM_LABELS, FORM_LABELS_EXACT, FORM_LABELS_PARTIAL,
     IS_MAC, IS_WINDOWS, IS_LINUX,
-    OLLAMA_BASE_URL, OLLAMA_OCR_MODEL,
 )
 
-# OCR Engine
+# OCR Engine (PaddleOCR)
 from .ocr_engine import (
-    get_ocr_reader, reader, LazyReader,
+    get_ocr_reader,
     extract_text_from_pdf, get_words_from_page_ocr, get_words_all,
     ocr_single_image, process_page_ocr,
 )
@@ -58,6 +56,6 @@ __all__ = [
     'highlight_text_differences', 'highlight_text_differences_db',
     'extract_text_from_pdf', 'build_word_index', 'build_word_index_parallel',
     'PARALLEL_OCR', 'FORCE_OCR',
-    'clean_text', 'normalize_for_compare', 'get_ocr_reader', 'reader',
+    'clean_text', 'normalize_for_compare', 'get_ocr_reader',
     'add_legend_to_image', 'print_summary',
 ]

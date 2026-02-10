@@ -3,7 +3,7 @@ from tkinter import filedialog, messagebox
 import tkinter as tk
 from PIL import ImageTk, Image
 import threading
-from ocr_processor_paddle import highlight_text_differences, highlight_text_differences_db
+from ocr_processor import highlight_text_differences, highlight_text_differences_db, extract_text_from_pdf
 import os
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -379,19 +379,17 @@ class App(ctk.CTk):
         finally:
             self.after(0, lambda: self.run_btn.configure(state="normal"))
 
-<<<<<<< Updated upstream
-=======
     def _run_llm_analysis(self, mode_val):
         """Run LLM comparison for File vs File (Hybrid mode)"""
         try:
             self.update_progress("\n🤖 Running LLM analysis (Typhoon Qwen v2.5-30b)...")
             self.after(0, lambda: self.progress_label.configure(text="Running LLM analysis (Typhoon Qwen)..."))
             
-            self.update_progress("  → [LOCAL] Extracting text (Typhoon OCR หรือ EasyOCR)...")
+            self.update_progress("  → [LOCAL] Extracting text (PaddleOCR)...")
             text1, engine1 = extract_text_from_pdf(self.pdf1_path)
             text2, engine2 = extract_text_from_pdf(self.pdf2_path)
-            self.update_progress(f"  ✅ Doc1 อ่านด้วย: {'Typhoon OCR 1.5 (Local)' if engine1 == 'typhoon' else 'EasyOCR (fallback)'}")
-            self.update_progress(f"  ✅ Doc2 อ่านด้วย: {'Typhoon OCR 1.5 (Local)' if engine2 == 'typhoon' else 'EasyOCR (fallback)'}")
+            self.update_progress(f"  ✅ Doc1 อ่านด้วย: PaddleOCR (Local)")
+            self.update_progress(f"  ✅ Doc2 อ่านด้วย: PaddleOCR (Local)")
             
             if not text1.strip() or not text2.strip():
                 self.update_progress("⚠️ LLM skipped: Could not extract enough text from PDFs.")
@@ -419,10 +417,10 @@ class App(ctk.CTk):
             self.update_progress("\n🤖 Running LLM analysis (Typhoon Qwen v2.5-30b)...")
             self.after(0, lambda: self.progress_label.configure(text="Running LLM analysis (Typhoon Qwen)..."))
             
-            self.update_progress("  → [LOCAL] Extracting text (Typhoon OCR หรือ EasyOCR)...")
+            self.update_progress("  → [LOCAL] Extracting text (PaddleOCR)...")
             text1, engine1 = extract_text_from_pdf(self.pdf1_path)
             text2 = db_doc.get('extracted_text', '') or ''
-            self.update_progress(f"  ✅ ไฟล์อ่านด้วย: {'Typhoon OCR 1.5 (Local)' if engine1 == 'typhoon' else 'EasyOCR (fallback)'}")
+            self.update_progress(f"  ✅ ไฟล์อ่านด้วย: PaddleOCR (Local)")
             
             if not text1.strip() or not text2.strip():
                 self.update_progress("⚠️ LLM skipped: Could not extract enough text.")
@@ -444,7 +442,6 @@ class App(ctk.CTk):
             self.update_progress(f"\n⚠️ LLM analysis failed: {e}")
             self.llm_result = f"Error: {e}"
 
->>>>>>> Stashed changes
     def display_summary(self, summary):
         """แสดง Summary ใน textbox"""
         self.append_text("\n" + "="*60 + "\n")
@@ -453,7 +450,7 @@ class App(ctk.CTk):
         
         mode_text = "Finding MATCHES" if summary.get('mode') == 'same' else "Finding DIFFERENCES"
         self.append_text(f"Mode: {mode_text}\n")
-        self.append_text("📖 อ่านข้อความ: Typhoon OCR 1.5 (Local) + ตำแหน่ง: EasyOCR\n")
+        self.append_text("📖 อ่านข้อความ: PaddleOCR (Local)\n")
         self.append_text("-"*60 + "\n")
         
         self.append_text(f"📄 Document 1: {summary.get('doc1_name', 'N/A')}\n")

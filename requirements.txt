@@ -1,12 +1,9 @@
 # PDF Compare - Requirements
 # Compatible with macOS, Windows, and Linux
 
-# OCR Engine
-# Typhoon OCR 1.5 รันผ่าน Ollama (LOCAL) - ไม่ต้อง pip install
-# ติดตั้ง Ollama แล้วรัน: ollama pull scb10x/typhoon-ocr1.5-3b
-
-# EasyOCR - สำหรับ bounding box extraction (visual highlighting)
-easyocr>=1.7.0
+# OCR Engine - PaddleOCR 3.x (LOCAL, fast, Thai+English PP-OCRv5 with bbox)
+paddlepaddle>=3.0.0
+paddleocr>=3.4.0
 
 # PDF Processing
 PyMuPDF>=1.23.0
@@ -15,12 +12,6 @@ PyMuPDF>=1.23.0
 Pillow>=10.0.0
 numpy>=1.24.0
 opencv-python-headless>=4.8.0
-
-# Machine Learning (PyTorch)
-# For macOS (Intel/Apple Silicon) - use CPU version
-# For Windows/Linux with NVIDIA GPU - can use CUDA version
-torch>=2.0.0
-torchvision>=0.15.0
 
 # GUI
 customtkinter>=5.2.0

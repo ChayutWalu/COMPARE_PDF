@@ -1,9 +1,8 @@
 """
 Configuration สำหรับ PDF comparison
 ====================================
-- Typhoon OCR (Ollama): อ่านข้อความ (LOCAL)
+- PaddleOCR: อ่านข้อความ + bbox (LOCAL)
 - Typhoon Qwen (API): สรุป/เปรียบเทียบ
-- EasyOCR: ใช้เฉพาะพิกัดคำ (bbox) สำหรับ visual highlighting
 """
 
 from dataclasses import dataclass
@@ -28,12 +27,7 @@ class OcrCompareConfig:
     debug_mode: bool = False
     force_ocr: bool = True
     use_process_pool: bool = False
-    
-    # ── Typhoon OCR 1.5 (LOCAL via Ollama) ──
-    # ข้อมูลไม่ออกนอกเครื่อง - รันผ่าน Ollama บน localhost
-    ollama_base_url: str = "http://localhost:11434/v1"
-    ollama_ocr_model: str = "scb10x/typhoon-ocr1.5-3b"
-    
+
     # ── Typhoon LLM (CLOUD API) ──
     # สำหรับสรุปเนื้อหาและหาจุดต่าง - เรียก API ภายนอก
     typhoon_llm_model: str = "typhoon-v2.5-30b-a3b-instruct"
@@ -52,9 +46,6 @@ FUZZY_THRESHOLD_STRICT = config.fuzzy_threshold_strict
 FUZZY_THRESHOLD_LOOSE = config.fuzzy_threshold_loose
 DEBUG_MODE = config.debug_mode
 FORCE_OCR = config.force_ocr
-
-OLLAMA_BASE_URL = config.ollama_base_url
-OLLAMA_OCR_MODEL = config.ollama_ocr_model
 
 IS_MAC = platform.system() == 'Darwin'
 IS_WINDOWS = platform.system() == 'Windows'

@@ -6,7 +6,7 @@ Typhoon LLM Client
 - เปรียบเทียบและหาจุดต่างระหว่างเอกสาร
 - วิเคราะห์ประเภทเอกสาร
 
-หมายเหตุ: การอ่านข้อความ (OCR) ใช้ Typhoon OCR 1.5 ใน ocr_engine.py
+หมายเหตุ: การอ่านข้อความ (OCR) ใช้ PaddleOCR ใน ocr_engine.py
 """
 
 import os
@@ -24,7 +24,7 @@ class TyphoonClient:
     """
     Client สำหรับ Typhoon LLM (Qwen-based)
     ใช้สำหรับวิเคราะห์ สรุป และเปรียบเทียบเอกสาร
-    (ไม่ใช่ OCR - OCR ใช้ Typhoon OCR 1.5 แยกต่างหาก)
+    (ไม่ใช่ OCR - OCR ใช้ PaddleOCR แยกต่างหาก)
     """
     def __init__(self, api_key=None):
         self.api_key = api_key or os.getenv("TYPHOON_API_KEY")

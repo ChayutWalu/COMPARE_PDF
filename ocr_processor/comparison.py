@@ -9,7 +9,6 @@ from PIL import Image
 
 from .config import PARALLEL_OCR, FORCE_OCR, OUTPUT_DPI
 from .indexing import build_word_index, build_word_index_parallel
-from .ocr_engine import _check_ollama
 from .highlighting import highlight_same_mode, highlight_diff_mode, highlight_same_mode_db, highlight_diff_mode_db
 from .ui_helpers import add_legend_to_image, print_summary
 
@@ -36,9 +35,7 @@ def highlight_text_differences(
 
     doc1_pages = len(doc1)
     doc2_pages = len(doc2)
-    # ถ้า Ollama พร้อม → ใช้ sequential (Typhoon ทำ parallel ไม่ได้)
-    # ถ้า Ollama ไม่พร้อม → ใช้ parallel ได้ (EasyOCR ล้วน)
-    use_parallel = PARALLEL_OCR and FORCE_OCR and not _check_ollama()
+    use_parallel = PARALLEL_OCR and FORCE_OCR
 
     update_progress(f"\n📄 Document 1: {os.path.basename(pdf1_path)} ({doc1_pages} pages)", 5)
 
@@ -130,7 +127,7 @@ def highlight_text_differences_db(
     db_index = db_document.get('word_index', {'by_page': {}, 'by_word': {}})
     db_page_count = db_document.get('page_count', 0)
 
-    use_parallel = PARALLEL_OCR and FORCE_OCR and not _check_ollama()
+    use_parallel = PARALLEL_OCR and FORCE_OCR
 
     update_progress(f"\n📄 Input File: {os.path.basename(pdf_path)} ({doc1_pages} pages)", 5)
     if use_parallel and doc1_pages > 1:

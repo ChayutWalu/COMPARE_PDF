@@ -63,7 +63,7 @@ def upload_document(pdf_path: str, document_id: str = None, progress_callback=No
         # Extract text for LLM comparison
         log("   → Extracting text...")
         extracted_text, ocr_engine = extract_text_from_pdf(pdf_path)
-        log(f"   ✅ อ่านข้อความด้วย: {'Typhoon OCR 1.5 (Local)' if ocr_engine == 'typhoon' else 'EasyOCR (fallback)'}")
+        log(f"   ✅ อ่านข้อความด้วย: PaddleOCR (Local)")
         
         # Build word index for highlighting
         log("   → Building word index (OCR)...")

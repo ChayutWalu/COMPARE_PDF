@@ -1,7 +1,7 @@
 import sys
 import os
 import argparse
-from ocr_processor_paddle import extract_text_from_pdf
+from ocr_processor import extract_text_from_pdf
 from llm_client import TyphoonClient
 
 def process_files(pdf1_path, pdf2_path, language='en', mode='diff', progress_callback=None):
@@ -16,21 +16,21 @@ def process_files(pdf1_path, pdf2_path, language='en', mode='diff', progress_cal
             progress_callback(msg)
 
     log("Initializing...")
-    log("  → OCR: Typhoon OCR 1.5 via Ollama (LOCAL - ข้อมูลไม่ออกนอกเครื่อง)")
+    log("  → OCR: PaddleOCR (LOCAL - ข้อมูลไม่ออกนอกเครื่อง)")
     log("  → LLM: Typhoon Qwen v2.5-30b via API (สรุปและเปรียบเทียบ)")
     client = TyphoonClient()
 
     log(f"\n[LOCAL OCR] Processing {pdf1_path}...")
     try:
         text1, engine1 = extract_text_from_pdf(pdf1_path)
-        log(f"  ✅ อ่านข้อความด้วย: {'Typhoon OCR 1.5 (Local)' if engine1 == 'typhoon' else 'EasyOCR (fallback)'}")
+        log(f"  ✅ อ่านข้อความด้วย: PaddleOCR (Local)")
     except Exception as e:
         return f"Error processing {pdf1_path}: {e}"
         
     log(f"\n[LOCAL OCR] Processing {pdf2_path}...")
     try:
         text2, engine2 = extract_text_from_pdf(pdf2_path)
-        log(f"  ✅ อ่านข้อความด้วย: {'Typhoon OCR 1.5 (Local)' if engine2 == 'typhoon' else 'EasyOCR (fallback)'}")
+        log(f"  ✅ อ่านข้อความด้วย: PaddleOCR (Local)")
     except Exception as e:
         return f"Error processing {pdf2_path}: {e}"
     
